@@ -7,11 +7,49 @@ from datetime import datetime
 import logging
 import sys
 import re
+import os
+import pathlib
+import sqlite_utils
 
 logging.basicConfig(level=logging.ERROR, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 logger.debug("llm_karpathy_consortium module is being imported")
+
+def user_dir() -> pathlib.Path:
+    """Get or create user directory for storing application data."""
+    llm_user_path = os.environ.get("LLM_USER_PATH")
+    if llm_user_path:
+        path = pathlib.Path(llm_user_path)
+    else:
+        path = pathlib.Path(click.get_app_dir("io.datasette.llm"))
+    path.mkdir(exist_ok=True, parents=True)
+    return path
+
+def logs_db_path() -> pathlib.Path:
+    """Get path to logs database."""
+    return user_dir() / "logs.db"
+
+class DatabaseConnection:
+    _instance: Optional['DatabaseConnection'] = None
+    
+    def __init__(self):
+        self.db = sqlite_utils.Database(logs_db_path())
+    
+    @classmethod
+    def get_connection(cls) -> sqlite_utils.Database:
+        """Get singleton database connection."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance.db
+
+def log_response(response, model):
+    """Log model response to database."""
+    try:
+        db = DatabaseConnection.get_connection()
+        response.log_to_db(db)
+    except Exception as e:
+        print(f"Error logging to database: {e}")
 
 class ConsortiumOrchestrator:
     def __init__(
@@ -72,6 +110,7 @@ class ConsortiumOrchestrator:
         logger.debug(f"Getting response from model: {model}")
         try:
             response = llm.get_model(model).prompt(prompt, system=self.system_prompt)
+            log_response(response, model)
             return {
                 "model": model,
                 "response": response.text(),
@@ -116,7 +155,8 @@ Refinement Areas:
 [List of areas that need further refinement, if any]"""
 
         arbiter_response = arbiter.prompt(arbiter_prompt)
-        
+        log_response(arbiter_response, arbiter)
+
         try:
             return self._parse_arbiter_response(arbiter_response.text())
         except Exception as e:
@@ -273,9 +313,10 @@ class KarpathyConsortiumPlugin:
     @llm.hookimpl
     def register_commands(cli):
         logger.debug("KarpathyConsortiumPlugin.register_commands called")
-        cli.add_command(consortium)
 
 logger.debug("llm_karpathy_consortium module finished loading")
 
 # Ensure the KarpathyConsortiumPlugin is exported
-__all__ = ['KarpathyConsortiumPlugin']
+__all__ = ['KarpathyConsortiumPlugin', 'log_response', 'DatabaseConnection', 'logs_db_path', 'user_dir']
+
+__version__ = "0.1.0"
