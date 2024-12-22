@@ -70,14 +70,13 @@ def setup_logging() -> None:
     console_handler.setLevel(logging.ERROR)
     console_handler.setFormatter(formatter)
     
-    # File handler with DEBUG level
     file_handler = logging.FileHandler(str(log_path))
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.ERROR)
     file_handler.setFormatter(formatter)
     
     # Configure root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.ERROR)
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
 
@@ -120,13 +119,13 @@ class ConsortiumOrchestrator:
         system_prompt: Optional[str] = None,
         confidence_threshold: float = 0.8,
         max_iterations: int = 3,
-        arbiter_model: Optional[str] = None,
+        arbiter: Optional[str] = None,
     ):
         self.models = models
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.confidence_threshold = confidence_threshold
         self.max_iterations = max_iterations
-        self.arbiter_model = arbiter_model or "claude-3-opus-20240229"
+        self.arbiter = arbiter or "claude-3-opus-20240229"
         self.iteration_history: List[IterationContext] = []
 
     async def orchestrate(self, prompt: str) -> Dict[str, Any]:
@@ -166,7 +165,7 @@ class ConsortiumOrchestrator:
             "synthesis": final_result,
             "metadata": {
                 "models_used": self.models,
-                "arbiter_model": self.arbiter_model,
+                "arbiter": self.arbiter,
                 "timestamp": datetime.utcnow().isoformat(),
                 "iteration_count": iteration_count
             }
@@ -277,7 +276,7 @@ Remember to be thorough in your reasoning and consider all aspects of the proble
 
     def _format_iteration_history(self) -> str:
         history = []
-        for i, iteration in enumerate(self.iteration_history[:-1], start=1):
+        for i, iteration in enumerate(self.iteration_history, start=1):
             model_responses = "\n".join(
                 f"<model_response>{r['model']}: {r.get('response', 'Error')}</model_response>"
                 for r in iteration.model_responses
@@ -311,7 +310,7 @@ Remember to be thorough in your reasoning and consider all aspects of the proble
 
     async def _synthesize_responses(self, original_prompt: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
         logger.debug("Synthesizing responses")
-        arbiter = llm.get_model(self.arbiter_model)
+        arbiter = llm.get_model(self.arbiter)
         
         formatted_history = self._format_iteration_history()
         formatted_responses = self._format_responses(responses)
@@ -446,7 +445,7 @@ def register_commands(cli):
         ],
     )
     @click.option(
-        "--arbiter-model",
+        "--arbiter",
         help="Model to use as arbiter",
         default="claude-3-opus-20240229"
     )
@@ -474,7 +473,7 @@ def register_commands(cli):
     def consortium(
         prompt: str,
         models: List[str],
-        arbiter_model: str,
+        arbiter: str,
         confidence_threshold: float,
         max_iterations: int,
         system: Optional[str],
@@ -483,14 +482,14 @@ def register_commands(cli):
         """Run prompt through a consortium of models and synthesize results."""
         logger.info(f"Starting consortium with {len(models)} models")
         logger.debug(f"Models: {', '.join(models)}")
-        logger.debug(f"Arbiter model: {arbiter_model}")
+        logger.debug(f"Arbiter model: {arbiter}")
         
         orchestrator = ConsortiumOrchestrator(
             models=list(models),
             system_prompt=system,
             confidence_threshold=confidence_threshold,
             max_iterations=max_iterations,
-            arbiter_model=arbiter_model,
+            arbiter=arbiter,
         )
         
         try:

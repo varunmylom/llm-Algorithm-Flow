@@ -197,15 +197,6 @@ Refinement Areas:
 
         return result
 
-    def _format_responses(self, responses: List[Dict[str, Any]]) -> str:
-        formatted = []
-        for r in responses:
-            formatted.append(f"""Model: {r['model']}
-Confidence: {r.get('confidence', 'N/A')}
-Response: {r.get('response', 'Error: ' + r.get('error', 'Unknown error'))}
----""")
-        return "\n\n".join(formatted)
-
     def _extract_confidence(self, text: str) -> float:
         # Simple heuristic to extract confidence from response
         for line in text.lower().split("\n"):
@@ -215,6 +206,16 @@ Response: {r.get('response', 'Error: ' + r.get('error', 'Unknown error'))}
                 except (IndexError, ValueError):
                     pass
         return 0.5  # Default confidence if not found
+    
+    def _format_responses(self, responses: List[Dict[str, Any]]) -> str:
+        formatted = []
+        for r in responses:
+            formatted.append(f"""Model: {r['model']}
+Confidence: {r.get('confidence', 'N/A')}
+Response: {r.get('response', 'Error: ' + r.get('error', 'Unknown error'))}
+---""")
+        return "\n\n".join(formatted)
+
 
 @llm.hookimpl
 def register_commands(cli):
