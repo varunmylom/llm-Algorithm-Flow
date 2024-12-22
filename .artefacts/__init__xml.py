@@ -193,32 +193,32 @@ class ConsortiumOrchestrator:
             logger.exception(f"Error getting response from {model}")
             return {"model": model, "error": str(e)}
 
-    def _parse_confidence_value(self, text: str, default: float = 0.5) -> float:
-        """Helper method to parse confidence values consistently."""
-        # Try to find XML confidence tag
+    def _extract_confidence(self, text: str) -> float:
+        """Extract confidence value from response text using both XML and text parsing."""
+        # First try to find XML confidence tag - now handles multiline
         xml_match = re.search(r"<confidence>\s*(0?\.\d+|1\.0|\d+)\s*</confidence>", text, re.DOTALL)
         if xml_match:
             try:
                 value = float(xml_match.group(1))
+                # Convert if it's a percentage (over 1)
                 return value / 100 if value > 1 else value
             except ValueError:
                 pass
         
-        # Fallback to plain text parsing
+        # Fallback to looking for confidence in plain text
         for line in text.lower().split("\n"):
             if "confidence:" in line or "confidence level:" in line:
                 try:
+                    # Extract number (handles both 0.85 and 85% formats)
                     nums = re.findall(r"(\d*\.?\d+)%?", line)
                     if nums:
                         num = float(nums[0])
+                        # Convert percentage to decimal if needed
                         return num / 100 if num > 1 else num
                 except (IndexError, ValueError):
                     pass
         
-        return default
-
-    def _extract_confidence(self, text: str) -> float:
-        return self._parse_confidence_value(text)
+        return 0.5  # Default confidence if not found
 
     def _construct_iteration_prompt(self, original_prompt: str, last_synthesis: Dict[str, Any]) -> str:
         # Todo: This does not apear in prompt logs db. Either it is not being called or it is not being logged.
@@ -417,7 +417,9 @@ Remember to maintain objectivity and consider all perspectives fairly in your an
             match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if match:
                 if key == "confidence":
-                    result[key] = self._parse_confidence_value(match.group(1))
+                    value = float(match.group(1))
+                    # Convert if it's a percentage (over 1)
+                    result[key] = value / 100 if value > 1 else value
                 elif key == "needs_iteration":
                     result[key] = match.group(1).lower() == "true"
                 elif key == "refinement_areas":
