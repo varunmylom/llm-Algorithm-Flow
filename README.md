@@ -70,7 +70,7 @@ llm consortium "What are the key considerations for AGI safety?"
 ### Options
 
 - `-m, --models`: Models to include in consortium (can specify multiple)
-- `--arbiter-model`: Model to use as arbiter (default: claude-3-opus-20240229)
+- `--arbiter`: Model to use as arbiter (default: claude-3-opus-20240229)
 - `--confidence-threshold`: Minimum confidence threshold (default: 0.8)
 - `--max-iterations`: Maximum number of iteration rounds (default: 3)
 - `--system`: Custom system prompt
