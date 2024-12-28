@@ -7,3 +7,4 @@ llm_consortium.egg-info/dependency_links.txt
 llm_consortium.egg-info/entry_points.txt
 llm_consortium.egg-info/requires.txt
 llm_consortium.egg-info/top_level.txt
+tests/test_llm_consortium.py
