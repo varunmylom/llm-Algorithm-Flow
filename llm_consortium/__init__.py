@@ -11,37 +11,37 @@ import os
 import pathlib
 import sqlite_utils
 
+# Read system prompt from file
+def _read_system_prompt() -> str:
+    try:
+        file_path = pathlib.Path(__file__).parent / "system_prompt.txt"
+        with open(file_path, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading system prompt file: {e}")
+        return ""
+
+def _read_arbiter_prompt() -> str:
+    try:
+        file_path = pathlib.Path(__file__).parent / "arbiter_prompt.xml"
+        with open(file_path, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading arbiter prompt file: {e}")
+        return ""
+
+def _read_iteration_prompt() -> str:
+    try:
+        file_path = pathlib.Path(__file__).parent / "iteration_prompt.txt"
+        with open(file_path, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading iteration prompt file: {e}")
+        return ""
+
 # Todo: Add a parser-model llm - if confidence score, or anything else is not found in the response by normal parsing - try to parse it with the parser model. If that fails, try to prompt the original model again n times.
 # Todo: <iteration_history> is empty.
-DEFAULT_SYSTEM_PROMPT = """Please follow these steps when formulating your response:
-
-1. Begin by carefully considering the specific instructions provided.
-
-2. Write your thought process inside <thought_process> tags. In this section:
-   - List key aspects that are relevant to the query
-   - Identify potential challenges or limitations
-   - Consider how the response instructions affect your approach
-   - Explore different angles, consider potential challenges, and explain your logic step-by-step
-
-3. After your thought process, provide your confidence level on a scale from 0 to 1, where 0 represents no confidence and 1 represents absolute certainty. Use <confidence> tags for this.
-
-4. Finally, present your answer within <answer> tags.
-
-Your response should follow this structure:
-
-<thought_process>
-[Your detailed thought process, exploring various aspects of the problem]
-</thought_process>
-
-<answer>
-[Your final, well-considered answer to the query]
-</answer>
-
-<confidence>
-[Your confidence level from 0 to 1]
-</confidence>
-
-Remember to be thorough in your reasoning, clear in your explanations, and precise in your confidence assessment. Your contribution is valuable to the consortium's collaborative problem-solving efforts."""
+DEFAULT_SYSTEM_PROMPT = _read_system_prompt()
 
 def user_dir() -> pathlib.Path:
     """Get or create user directory for storing application data."""
@@ -194,11 +194,11 @@ class ConsortiumOrchestrator:
 
     def _parse_confidence_value(self, text: str, default: float = 0.5) -> float:
         """Helper method to parse confidence values consistently."""
-        # Try to find XML confidence tag
-        xml_match = re.search(r"<confidence>\s*(0?\.\d+|1\.0|\d+)\s*</confidence>", text, re.DOTALL)
+        # Try to find XML confidence tag, now handling multi-line and whitespace better
+        xml_match = re.search(r"<confidence>\s*(0?\.\d+|1\.0|\d+)\s*</confidence>", text, re.IGNORECASE | re.DOTALL)
         if xml_match:
             try:
-                value = float(xml_match.group(1))
+                value = float(xml_match.group(1).strip())
                 return value / 100 if value > 1 else value
             except ValueError:
                 pass
@@ -220,59 +220,21 @@ class ConsortiumOrchestrator:
         return self._parse_confidence_value(text)
 
     def _construct_iteration_prompt(self, original_prompt: str, last_synthesis: Dict[str, Any]) -> str:
-        # Todo: This does not apear in prompt logs db. Either it is not being called or it is not being logged.
-        return f"""You are part of a model consortium working together to solve complex problems through an iterative process. Your task is to provide an updated response to a problem, considering previous work and focusing on specific refinement areas.
-
-Review the previous iterations of work on this problem:
-
-<previous_iterations>
-{self._format_iteration_history()}
-</previous_iterations>
-
-Consider the most recent synthesis and the areas identified for refinement:
-
-<previous_synthesis>
-{last_synthesis['synthesis']}
-</previous_synthesis>
-
-<refinement_areas>
-{self._format_refinement_areas(last_synthesis['refinement_areas'])}
-</refinement_areas>
-
-Here's the original prompt you're addressing:
-
-<original_prompt>
+        """Construct the prompt for the next iteration."""
+        iteration_prompt_template = _read_iteration_prompt()
+        iteration_history = self._format_iteration_history()
+        
+        # Create the formatted prompt directly
+        return f"""Refining response for original prompt:
 {original_prompt}
-</original_prompt>
 
-Instructions:
-1. Analyze the original prompt, previous iterations, and refinement areas.
-2. Provide an updated response that addresses the refinement areas while considering the full context.
-3. Explain your reasoning thoroughly.
-4. Include a confidence level (0-1) for your response.
+Previous synthesis results:
+{json.dumps(last_synthesis, indent=2)}
 
-Please structure your response as follows:
+Previous iteration history:
+{iteration_history}
 
-<problem_breakdown>
-- Summarize key points from previous iterations and synthesis.
-- Identify patterns or trends across iterations.
-- List potential approaches to address each refinement area.
-- Provide a detailed analysis of the problem, previous work, and refinement areas. Break down your thought process and consider different approaches.
-</problem_breakdown>
-
-<updated_response>
-Provide your updated response, addressing the refinement areas and incorporating insights from your analysis. For each refinement area, explicitly state how it is addressed in your response.
-</updated_response>
-
-<reasoning>
-Explain your reasoning for the updated response, referencing specific points from your analysis and how they informed your decisions.
-</reasoning>
-
-<confidence>
-State your confidence level as a number between 0 and 1.
-</confidence>
-
-Remember to be thorough in your reasoning and consider all aspects of the problem before providing your final response."""
+Please provide an improved response that addresses any issues identified in the previous iterations."""
 
     def _format_iteration_history(self) -> str:
         history = []
@@ -315,83 +277,26 @@ Remember to be thorough in your reasoning and consider all aspects of the proble
         formatted_history = self._format_iteration_history()
         formatted_responses = self._format_responses(responses)
         
-        arbiter_prompt = f"""You are an advanced AI synthesis system designed to analyze and combine multiple AI-generated responses into a comprehensive and well-reasoned final output. Your task is to review the following information and produce a synthesized response that represents the best consensus while highlighting important dissenting views.
-
-Here is the iteration history of the responses:
-
-<iteration_history>
-{formatted_history}
-</iteration_history>
-
-Here are the model responses to be analyzed:
-
-<model_responses>
-{formatted_responses}
-</model_responses>
-
-Here is the original prompt that generated the responses:
-
-<original_prompt>
-{original_prompt}
-</original_prompt>
-
-Please follow these steps to complete your task:
-
-1. Carefully analyze the original prompt, iteration history, and model responses.
-2. Extract and list key points from each model response.
-3. Compare and contrast the key points from different responses.
-4. Evaluate the relevance of each response to the original prompt.
-5. Identify areas of agreement and disagreement among the responses.
-6. Synthesize a final response that represents the best consensus.
-7. Determine your confidence level in the synthesized response.
-8. Highlight any important dissenting views.
-9. Assess whether further iterations are needed.
-10. If further iterations are needed, provide recommendations for refinement areas.
-
-Wrap your thought process inside <thought_process> tags before providing the final output. In your thought process, consider the following questions:
-- What are the key points addressed by each model response?
-- How do the responses align or differ from each other?
-- What are the strengths and weaknesses of each response?
-- Are there any unique insights or perspectives offered by specific responses?
-- How well does each response address the original prompt?
-
-After your thought process, provide your synthesized output using the following format:
-
-<synthesis_output>
-    <synthesis>
-        [Your synthesized response here. This should be a comprehensive summary that combines the best elements of the analyzed responses while addressing the original prompt effectively.]
-    </synthesis>
-    
-    <confidence>
-        [Your confidence in this synthesis, expressed as a decimal between 0 and 1. For example, 0.85 would indicate 85% confidence.]
-    </confidence>
-    
-    <analysis>
-        [A concise summary of your analysis, explaining how you arrived at your synthesized response and confidence level.]
-    </analysis>
-    
-    <dissent>
-        [List any notable dissenting views or alternative perspectives that were not incorporated into the main synthesis but are still worth considering.]
-    </dissent>
-    
-    <needs_iteration>
-        [Indicate whether further iteration is needed. Use "true" if more refinement is necessary, or "false" if the current synthesis is sufficient.]
-    </needs_iteration>
-    
-    <refinement_areas>
-        [If needs_iteration is true, provide a list of specific areas or aspects that require further refinement or exploration in subsequent iterations.]
-    </refinement_areas>
-</synthesis_output>
-
-Remember to maintain objectivity and consider all perspectives fairly in your analysis and synthesis. Your goal is to provide a comprehensive and balanced response that accurately represents the collective insights from the model responses while addressing the original prompt effectively."""
+        # Load and format the arbiter prompt template
+        arbiter_prompt_template = _read_arbiter_prompt()
+        arbiter_prompt = arbiter_prompt_template.format(
+            original_prompt=original_prompt,
+            formatted_responses=formatted_responses,
+            formatted_history=formatted_history
+        )
 
         arbiter_response = arbiter.prompt(arbiter_prompt)
         log_response(arbiter_response, arbiter)
+        
+        # Print raw arbiter response
+        click.echo("\nArbiter Response:\n")
+        click.echo(arbiter_response.text())
+        click.echo("\n---\n")
 
         try:
             return self._parse_arbiter_response(arbiter_response.text())
         except Exception as e:
-            logger.exception("Error parsing arbiter response")
+            logger.error(f"Error parsing arbiter response: {e}")
             return {
                 "synthesis": arbiter_response.text(),
                 "confidence": 0.5,
@@ -404,7 +309,7 @@ Remember to maintain objectivity and consider all perspectives fairly in your an
     def _parse_arbiter_response(self, text: str) -> Dict[str, Any]:
         sections = {
             "synthesis": r"<synthesis>([\s\S]*?)</synthesis>",
-            "confidence": r"<confidence>\s*(0?\.\d+|1\.0|\d+)\s*</confidence>",
+            "confidence": r"<confidence>\s*([\d.]+)\s*</confidence>",
             "analysis": r"<analysis>([\s\S]*?)</analysis>",
             "dissent": r"<dissent>([\s\S]*?)</dissent>",
             "needs_iteration": r"<needs_iteration>(true|false)</needs_iteration>",
@@ -416,7 +321,11 @@ Remember to maintain objectivity and consider all perspectives fairly in your an
             match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if match:
                 if key == "confidence":
-                    result[key] = self._parse_confidence_value(match.group(1))
+                    try:
+                        value = float(match.group(1).strip())
+                        result[key] = value / 100 if value > 1 else value
+                    except (ValueError, TypeError):
+                        result[key] = 0.5
                 elif key == "needs_iteration":
                     result[key] = match.group(1).lower() == "true"
                 elif key == "refinement_areas":
@@ -427,6 +336,13 @@ Remember to maintain objectivity and consider all perspectives fairly in your an
                 result[key] = "" if key != "confidence" else 0.5
 
         return result
+
+# Add this helper function before the register_commands
+def read_stdin_if_not_tty() -> Optional[str]:
+    """Read from stdin if it's not a terminal."""
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    return None
 
 @llm.hookimpl
 def register_commands(cli):
@@ -470,6 +386,16 @@ def register_commands(cli):
         type=click.Path(dir_okay=False, writable=True),
         help="Save full results to this JSON file",
     )
+    @click.option(
+        "--stdin/--no-stdin",
+        default=True,
+        help="Read additional input from stdin and append to prompt",
+    )
+    @click.option(
+        "--raw",
+        is_flag=True,
+        help="Output raw response from arbiter model",
+    )
     def consortium(
         prompt: str,
         models: List[str],
@@ -478,8 +404,22 @@ def register_commands(cli):
         max_iterations: int,
         system: Optional[str],
         output: Optional[str],
+        stdin: bool,
+        raw: bool,
     ):
-        """Run prompt through a consortium of models and synthesize results."""
+        """Run prompt through a consortium of models and synthesize results.
+        
+        Reads additional input from stdin if provided and --stdin flag is enabled.
+        The stdin content will be appended to the prompt argument.
+        """
+        if confidence_threshold > 1.0:
+            confidence_threshold /= 100.0
+
+        if stdin:
+            stdin_content = read_stdin_if_not_tty()
+            if stdin_content:
+                prompt = f"{prompt}\n\n{stdin_content}"
+        
         logger.info(f"Starting consortium with {len(models)} models")
         logger.debug(f"Models: {', '.join(models)}")
         logger.debug(f"Arbiter model: {arbiter}")
@@ -513,12 +453,12 @@ def register_commands(cli):
                 click.echo(result["synthesis"]["dissent"])
             
             click.echo(f"\nNumber of iterations: {result['metadata']['iteration_count']}")
-            
-            click.echo("\nIndividual model responses:")
-            for response in result["model_responses"]:
-                click.echo(f"\nModel: {response['model']}")
-                click.echo(f"Confidence: {response.get('confidence', 'N/A')}")
-                click.echo(f"Response: {response.get('response', 'Error: ' + response.get('error', 'Unknown error'))}")
+            if raw:            
+                click.echo("\nIndividual model responses:")
+                for response in result["model_responses"]:
+                    click.echo(f"\nModel: {response['model']}")
+                    click.echo(f"Confidence: {response.get('confidence', 'N/A')}")
+                    click.echo(f"Response: {response.get('response', 'Error: ' + response.get('error', 'Unknown error'))}")
                 
         except Exception as e:
             logger.exception("Error in consortium command")
@@ -532,7 +472,7 @@ class KarpathyConsortiumPlugin:
 
 logger.debug("llm_karpathy_consortium module finished loading")
 
-# Ensure the KarpathyConsortiumPlugin is exported
+
 __all__ = ['KarpathyConsortiumPlugin', 'log_response', 'DatabaseConnection', 'logs_db_path', 'user_dir']
 
 __version__ = "0.1.0"

@@ -15,32 +15,84 @@ Requires-Dist: httpx
 Requires-Dist: sqlite-utils
 Requires-Dist: asyncio
 
-# LLM Karpathy Consortium
+# LLM Consortium
 
-A sophisticated plugin for the `llm` package that implements an advanced model consortium system with iterative refinement and response synthesis capabilities. This plugin orchestrates multiple language models to collaboratively solve complex problems through structured dialogue and arbitration.
+## Inspiration
+
+Based on Karpathy's observation:
+
+"I find that recently I end up using all of the models and all the time. One aspect is the curiosity of who gets what, but the other is that for a lot of problems they have this "NP Complete" nature to them, where coming up with a solution is significantly harder than verifying a candidate solution. So your best performance will come from just asking all the models, and then getting them to come to a consensus."
+
+A plugin for the `llm` package that implements a model consortium system with iterative refinement and response synthesis. This plugin orchestrates multiple learned language models to collaboratively solve complex problems through structured dialogue, evaluation and arbitration.
+
+## Core Algorithm Flow
+
+The following Mermaid diagram illustrates the core algorithm flow of the LLM Karpathy Consortium:
+
+```mermaid
+flowchart TD
+    A[Start] --> B[Get Model Responses]
+    B --> C[Synthesize Responses]
+    C --> D{Check Confidence}
+    D -- Confidence >= Threshold --> E[Return Final Result]
+    D -- Confidence < Threshold --> F{Max Iterations Reached?}
+    F -- No --> G[Prepare Next Iteration]
+    G --> B
+    F -- Yes --> E
+```
 
 ## Features
 
 - **Multi-Model Orchestration**: Coordinate responses from multiple LLMs simultaneously
 - **Iterative Refinement**: Automatically refine responses through multiple rounds until confidence threshold is met
-- **Structured Response Format**: XML-based response structure for consistent parsing and analysis
 - **Advanced Arbitration**: Uses a designated arbiter model to synthesize and evaluate responses
 - **Database Logging**: Built-in SQLite logging of all interactions and responses
-- **Comprehensive Error Handling**: Robust error handling and logging system
 - **Configurable Parameters**: Adjustable confidence thresholds, iteration limits, and model selection
+- **Hundreds of Models**: Supports all models available via llm plugins
 
 ## Installation
+First, get https://github.com/simonw/llm
+
+uv:
+```bash
+uv tool install llm
+```
+pipx:
+```bash
+pipx install llm
+```
 
 ```bash
-pip install llm-karpathy-consortium
+llm install llm-consortium
 ```
 
 ## Command Line Usage
 
 Basic usage:
 ```bash
-llm consortium "Your prompt"
+llm consortium "What are the key considerations for AGI safety?"
 ```
+
+## This will
+
+1. Send the prompt to multiple models in parallel.
+2. Gather responses including reasoning and confidence.
+3. Use an arbiter model to synthesize the responses and identify key points of agreement/disagreement
+4. The arbiter model evaluates confidence
+5. If confidence is below threshold and max iterations not reached:
+   - Refinement areas are identified
+   - A new iteration begins with an enhanced prompt
+6. Process continues until confidence threshold is met or max iterations reached
+  
+### Options
+
+- `-m, --models`: Models to include in consortium (can specify multiple)
+- `--arbiter-model`: Model to use as arbiter (default: claude-3-opus-20240229)
+- `--confidence-threshold`: Minimum confidence threshold (default: 0.8)
+- `--max-iterations`: Maximum number of iteration rounds (default: 3)
+- `--system`: Custom system prompt
+- `--output`: Save full results to a JSON file
+
 
 Advanced usage with options:
 ```bash
@@ -55,16 +107,7 @@ llm consortium "Your complex query" \
   --output results.json
 ```
 
-### Options
-
-- `-m, --models`: Models to include in consortium (can specify multiple)
-- `--arbiter-model`: Model to use as arbiter (default: claude-3-opus-20240229)
-- `--confidence-threshold`: Minimum confidence threshold (default: 0.8)
-- `--max-iterations`: Maximum number of iteration rounds (default: 3)
-- `--system`: Custom system prompt
-- `--output`: Save full results to a JSON file
-
-## Response Structure
+### Response Structure
 
 The plugin uses a structured XML format for responses:
 
@@ -82,24 +125,9 @@ The plugin uses a structured XML format for responses:
 </confidence>
 ```
 
-## Iteration Process
+### Database Logging
 
-1. Initial responses are gathered from all configured models
-2. The arbiter model synthesizes responses and evaluates confidence
-3. If confidence is below threshold and max iterations not reached:
-   - Refinement areas are identified
-   - A new iteration begins with an enhanced prompt
-4. Process continues until confidence threshold is met or max iterations reached
-
-## Database Logging
-
-All interactions are automatically logged to a SQLite database located in the LLM user directory:
-
-- Model responses
-- Confidence levels
-- Iteration history
-- Synthesis results
-- Timing information
+All interactions are automatically logged to a SQLite database located in the LLM user directory.
 
 ## Programmatic Usage
 
@@ -119,41 +147,6 @@ print(f"Synthesized Response: {result['synthesis']['synthesis']}")
 print(f"Confidence: {result['synthesis']['confidence']}")
 print(f"Analysis: {result['synthesis']['analysis']}")
 ```
-
-## Architecture
-
-The plugin uses a layered architecture:
-
-1. **ConsortiumOrchestrator**: Main orchestration layer
-2. **DatabaseConnection**: Singleton for database operations
-3. **IterationContext**: Manages iteration state and history
-4. **Response Synthesis**: Handled by arbiter model
-5. **Logging System**: Multi-level logging with file and console output
-
-## Core Algorithm Flow
-
-The following Mermaid diagram illustrates the core algorithm flow of the LLM Karpathy Consortium:
-
-```mermaid
-flowchart TD
-    A[Start] --> B[Get Model Responses]
-    B --> C[Synthesize Responses]
-    C --> D{Check Confidence}
-    D -- Confidence >= Threshold --> E[Return Final Result]
-    D -- Confidence < Threshold --> F{Max Iterations Reached?}
-    F -- No --> G[Prepare Next Iteration]
-    G --> B
-    F -- Yes --> E
-```
-
-## Development
-
-To contribute:
-
-1. Clone the repository
-2. Install development dependencies: `pip install -e ".[dev]"`
-3. Run tests: `pytest`
-4. Submit pull requests with tests and documentation
 
 ## License
 
