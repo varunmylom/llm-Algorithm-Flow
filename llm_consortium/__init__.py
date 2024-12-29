@@ -2,7 +2,7 @@ import click
 import json
 import llm
 import asyncio
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import logging
 import sys
@@ -10,6 +10,7 @@ import re
 import os
 import pathlib
 import sqlite_utils
+from pydantic import BaseModel
 
 # Read system prompt from file
 def _read_system_prompt() -> str:
@@ -39,8 +40,6 @@ def _read_iteration_prompt() -> str:
         logger.error(f"Error reading iteration prompt file: {e}")
         return ""
 
-# Todo: Add a parser-model llm - if confidence score, or anything else is not found in the response by normal parsing - try to parse it with the parser model. If that fails, try to prompt the original model again n times.
-# Todo: <iteration_history> is empty.
 DEFAULT_SYSTEM_PROMPT = _read_system_prompt()
 
 def user_dir() -> pathlib.Path:
@@ -112,21 +111,30 @@ class IterationContext:
         self.synthesis = synthesis
         self.model_responses = model_responses
 
+
+class ConsortiumConfig(BaseModel):
+    models: List[str]
+    system_prompt: Optional[str] = None
+    confidence_threshold: float = 0.8
+    max_iterations: int = 3
+    arbiter: Optional[str] = None
+
+    def to_dict(self):
+        return self.model_dump()
+    
+    @classmethod
+    def from_dict(cls, data):
+        return cls(**data)
+
 class ConsortiumOrchestrator:
-    def __init__(
-        self,
-        models: List[str],
-        system_prompt: Optional[str] = None,
-        confidence_threshold: float = 0.8,
-        max_iterations: int = 3,
-        arbiter: Optional[str] = None,
-    ):
-        self.models = models
-        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
-        self.confidence_threshold = confidence_threshold
-        self.max_iterations = max_iterations
-        self.arbiter = arbiter or "claude-3-opus-20240229"
+    def __init__(self, config: ConsortiumConfig):
+        self.models = config.models
+        self.system_prompt = config.system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.confidence_threshold = config.confidence_threshold
+        self.max_iterations = config.max_iterations
+        self.arbiter = config.arbiter or "claude-3-opus-20240229"
         self.iteration_history: List[IterationContext] = []
+        
 
     async def orchestrate(self, prompt: str) -> Dict[str, Any]:
         iteration_count = 0
@@ -344,9 +352,117 @@ def read_stdin_if_not_tty() -> Optional[str]:
         return sys.stdin.read().strip()
     return None
 
+class ConsortiumModel(llm.Model):
+    can_stream = True
+    
+    class Options(llm.Options):
+        confidence_threshold: Optional[float] = None
+        max_iterations: Optional[int] = None
+        stream_individual_responses: bool = False
+    
+    def __init__(self, model_id: str, config: ConsortiumConfig):
+        self.model_id = model_id
+        self.config = config
+        self._orchestrator = None  # Lazy initialization
+    
+    def __str__(self):
+        return f"Consortium Model: {self.model_id}"
+    
+    def get_orchestrator(self):
+        if self._orchestrator is None:
+            try:
+                self._orchestrator = ConsortiumOrchestrator(self.config)
+            except Exception as e:
+                raise llm.ModelError(f"Failed to initialize consortium: {e}")
+        return self._orchestrator
+
+    async def execute(self, prompt, stream, response, conversation):
+        try:
+            orchestrator = self.get_orchestrator()
+            
+            # Apply runtime options
+            if self.Options.confidence_threshold is not None:
+                orchestrator.confidence_threshold = self.Options.confidence_threshold
+            if self.Options.max_iterations is not None:
+                orchestrator.max_iterations = self.Options.max_iterations
+            
+            result = await orchestrator.orchestrate(prompt.prompt)
+            
+            if stream:
+                if self.Options.stream_individual_responses:
+                    for model_response in result['model_responses']:
+                        yield f"[{model_response['model']}]: {model_response['response']}\n"
+                    yield "\nSynthesized response:\n"
+                yield result['synthesis']['synthesis']
+            else:
+                response.response_json = result
+                yield result["synthesis"]["synthesis"]
+                
+        except Exception as e:
+            raise llm.ModelError(f"Consortium execution failed: {e}")
+
+    def execute(self, prompt, stream, response, conversation):
+        """Non-async execute method that handles the async orchestration internally"""
+        try:
+            # Run the async orchestration synchronously
+            result = asyncio.run(self.get_orchestrator().orchestrate(prompt.prompt))
+            
+            if stream:
+                if self.Options.stream_individual_responses:
+                    # Stream individual responses
+                    for model_response in result['model_responses']:
+                        yield f"[{model_response['model']}]: {model_response['response']}\n"
+                    yield "\nSynthesized response:\n"
+                yield result['synthesis']['synthesis']
+            else:
+                response.response_json = result
+                yield result["synthesis"]["synthesis"]
+                
+        except Exception as e:
+            raise llm.ModelError(f"Consortium execution failed: {e}")
+
+def _get_consortium_configs() -> Dict[str, ConsortiumConfig]:
+    """Fetch saved consortium configurations from the database."""
+    db = DatabaseConnection.get_connection()
+    
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS consortium_configs (
+            name TEXT PRIMARY KEY,
+            config TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    configs = {}
+    for row in db["consortium_configs"].rows:
+        config_name = row["name"]
+        config_data = json.loads(row["config"])
+        configs[config_name] = ConsortiumConfig.from_dict(config_data)
+    return configs
+
+def _save_consortium_config(name: str, config: ConsortiumConfig) -> None:
+    """Save a consortium configuration to the database."""
+    db = DatabaseConnection.get_connection()
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS consortium_configs (
+            name TEXT PRIMARY KEY,
+            config TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db["consortium_configs"].insert(
+        {"name": name, "config": json.dumps(config.to_dict())}, replace=True
+    )
+        
 @llm.hookimpl
 def register_commands(cli):
-    @cli.command()
+    @cli.group()
+    def consortium():
+        """Commands for managing and running model consortiums"""
+        pass
+
+    # Move run command under consortium group
+    @consortium.command(name="run")
     @click.argument("prompt")
     @click.option(
         "-m",
@@ -396,22 +512,10 @@ def register_commands(cli):
         is_flag=True,
         help="Output raw response from arbiter model",
     )
-    def consortium(
-        prompt: str,
-        models: List[str],
-        arbiter: str,
-        confidence_threshold: float,
-        max_iterations: int,
-        system: Optional[str],
-        output: Optional[str],
-        stdin: bool,
-        raw: bool,
-    ):
-        """Run prompt through a consortium of models and synthesize results.
-        
-        Reads additional input from stdin if provided and --stdin flag is enabled.
-        The stdin content will be appended to the prompt argument.
-        """
+    def run_command(prompt, models, arbiter, confidence_threshold, max_iterations,
+                   system, output, stdin, raw):
+        """Run prompt through a consortium of models and synthesize results."""
+        # Convert percentage to decimal if needed
         if confidence_threshold > 1.0:
             confidence_threshold /= 100.0
 
@@ -425,11 +529,13 @@ def register_commands(cli):
         logger.debug(f"Arbiter model: {arbiter}")
         
         orchestrator = ConsortiumOrchestrator(
-            models=list(models),
-            system_prompt=system,
-            confidence_threshold=confidence_threshold,
-            max_iterations=max_iterations,
-            arbiter=arbiter,
+            config=ConsortiumConfig(
+               models=list(models),
+               system_prompt=system,
+               confidence_threshold=confidence_threshold,
+               max_iterations=max_iterations,
+               arbiter=arbiter,
+            )
         )
         
         try:
@@ -464,6 +570,135 @@ def register_commands(cli):
             logger.exception("Error in consortium command")
             raise click.ClickException(str(e))
 
+    # Register consortium management commands group
+    @consortium.command(name="save")
+    @click.argument("name")
+    @click.option(
+        "-m",
+        "--models",
+        multiple=True,
+        help="Models to include in consortium (can specify multiple)",
+        required=True,
+    )
+    @click.option(
+        "--arbiter",
+        help="Model to use as arbiter",
+        required=True
+    )
+    @click.option(
+        "--confidence-threshold",
+        type=float,
+        help="Minimum confidence threshold",
+        default=0.8
+    )
+    @click.option(
+        "--max-iterations",
+        type=int,
+        help="Maximum number of iteration rounds",
+        default=3
+    )
+    @click.option(
+        "--system",
+        help="System prompt to use",
+    )
+    def save_command(name, models, arbiter, confidence_threshold, max_iterations, system):
+        """Save a consortium configuration."""
+        config = ConsortiumConfig(
+            models=models,
+            arbiter=arbiter,
+            confidence_threshold=confidence_threshold,
+            max_iterations=max_iterations,
+            system_prompt=system,
+        )
+        _save_consortium_config(name, config)
+        click.echo(f"Consortium configuration '{name}' saved.")
+        click.echo("Options: --option confidence_threshold=0.9 --option stream_individual_responses=true")
+
+    @consortium.command(name="list")
+    def list_command():
+        """List all saved consortiums."""
+        db = DatabaseConnection.get_connection()
+        
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS consortium_configs (
+            name TEXT PRIMARY KEY,
+            config TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        
+        consortiums = list(db["consortium_configs"].rows)
+        if not consortiums:
+            click.echo("No consortiums found.")
+            return
+
+        click.echo("Available consortiums:")
+        for row in consortiums:
+            click.echo(f"- {row['name']}")
+
+    @consortium.command(name="show")
+    @click.argument("name")
+    def show_command(name):
+        """Show details of a saved consortium."""
+        db = DatabaseConnection.get_connection()
+        
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS consortium_configs (
+            name TEXT PRIMARY KEY,
+            config TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        try:
+            consortium_config = db["consortium_configs"].get(name)
+            if not consortium_config:
+               raise click.ClickException(f"Consortium with name '{name}' not found.")
+            
+            config_data = json.loads(consortium_config['config'])
+            config = ConsortiumConfig.from_dict(config_data)
+
+            click.echo(f"Consortium: {name}")
+            click.echo(f"  Models: {', '.join(config.models)}")
+            click.echo(f"  Arbiter: {config.arbiter}")
+            click.echo(f"  Confidence Threshold: {config.confidence_threshold}")
+            click.echo(f"  Max Iterations: {config.max_iterations}")
+            if config.system_prompt:
+                click.echo(f"  System Prompt: {config.system_prompt}")
+        except sqlite_utils.db.NotFoundError:
+            raise click.ClickException(f"Consortium with name '{name}' not found.")
+
+    @consortium.command(name="remove")
+    @click.argument("name")
+    def remove_command(name):
+        """Remove a saved consortium."""
+        db = DatabaseConnection.get_connection()
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS consortium_configs (
+            name TEXT PRIMARY KEY,
+            config TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        try:
+            db["consortium_configs"].delete(name)
+            click.echo(f"Consortium '{name}' removed.")
+        except sqlite_utils.db.NotFoundError:
+            raise click.ClickException(f"Consortium with name '{name}' not found.")
+
+
+@llm.hookimpl
+def register_models(register):
+    logger.debug("KarpathyConsortiumPlugin.register_commands called")
+    try:
+        for name, config in _get_consortium_configs().items():
+            try:
+                model = ConsortiumModel(name, config)
+                register(model, aliases=(name,))
+            except Exception as e:
+                logger.error(f"Failed to register consortium '{name}': {e}")
+    except Exception as e:
+        logger.error(f"Failed to load consortium configurations: {e}")
+
 class KarpathyConsortiumPlugin:
     @staticmethod
     @llm.hookimpl
@@ -472,7 +707,6 @@ class KarpathyConsortiumPlugin:
 
 logger.debug("llm_karpathy_consortium module finished loading")
 
+__all__ = ['KarpathyConsortiumPlugin', 'log_response', 'DatabaseConnection', 'logs_db_path', 'user_dir', 'ConsortiumModel']
 
-__all__ = ['KarpathyConsortiumPlugin', 'log_response', 'DatabaseConnection', 'logs_db_path', 'user_dir']
-
-__version__ = "0.1.0"
+__version__ = "0.3.0"
