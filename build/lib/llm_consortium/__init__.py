@@ -406,20 +406,13 @@ class ConsortiumModel(llm.Model):
         try:
             # Run the async orchestration synchronously
             result = asyncio.run(self.get_orchestrator().orchestrate(prompt.prompt))
-            click.echo(f"result: {result}")
+            
             if stream:
-                click.echo(f"Stream: {stream}")
-                # Get stream_individual_responses from options
-                stream_individual = self.Options.stream_individual_responses
-                click.echo(f"Stream individual responses: {stream_individual}")
-                if stream_individual:
-                    # Yield individual model responses
+                if self.Options.stream_individual_responses:
+                    # Stream individual responses
                     for model_response in result['model_responses']:
-                        yield f"[{model_response['model']}]:\n"
-                        yield f"{model_response['response']}\n\n"
+                        yield f"[{model_response['model']}]: {model_response['response']}\n"
                     yield "\nSynthesized response:\n"
-                
-                # Always yield the final synthesis
                 yield result['synthesis']['synthesis']
             else:
                 response.response_json = result
