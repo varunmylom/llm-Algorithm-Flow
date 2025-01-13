@@ -1,6 +1,6 @@
 [project]
 name = "llm-consortium"
-version = "0.2"
+version = "0.3"
 description = "LLM plugin implementing Andrej Karpathy's model consortium tweet"
 readme = "README.md"
 authors = [{name = "Thomas Hughes", email = "irthomasthomas@gmail.com"}]
@@ -29,3 +29,10 @@ filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.setuptools]
 packages = ["llm_consortium"]
+
+[tool.setuptools.package-data]
+llm_consortium = [
+    "system_prompt.txt",
+    "arbiter_prompt.xml",
+    "iteration_prompt.txt"
+]
