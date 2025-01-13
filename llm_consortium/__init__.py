@@ -12,6 +12,15 @@ import pathlib
 import sqlite_utils
 from pydantic import BaseModel
 
+# Todo: 
+# "finish_reason": "length"
+# "finish_reason": "max_tokens"
+# "stop_reason": "max_tokens",
+# "finishReason": "MAX_TOKENS"
+# "finishReason": "length"
+# response.response_json
+# Todo: setup continuation models: claude, deepseek etc.
+
 # Read system prompt from file
 def _read_system_prompt() -> str:
     try:
@@ -56,7 +65,6 @@ def logs_db_path() -> pathlib.Path:
     """Get path to logs database."""
     return user_dir() / "logs.db"
 
-
 def setup_logging() -> None:
     """Configure logging to write to both file and console."""
     log_path = user_dir() / "consortium.log"
@@ -97,12 +105,39 @@ class DatabaseConnection:
             cls._instance = cls()
         return cls._instance.db
 
+def _get_finish_reason(response_json: Dict[str, Any]) -> Optional[str]:
+    """Helper function to extract finish reason from various API response formats."""
+    if not isinstance(response_json, dict):
+        return None
+    # List of possible keys for finish reason (case-insensitive)
+    reason_keys = ['finish_reason', 'finishReason', 'stop_reason']
+    
+    # Convert response to lowercase for case-insensitive matching
+    lower_response = {k.lower(): v for k, v in response_json.items()}
+    
+    # Check each possible key
+    for key in reason_keys:
+        value = lower_response.get(key.lower())
+        if value:
+            return str(value).lower()
+    
+    return None
+
 def log_response(response, model):
     """Log model response to database and log file."""
     try:
         db = DatabaseConnection.get_connection()
         response.log_to_db(db)
         logger.debug(f"Response from {model} logged to database")
+        
+        # Check for truncation in various formats
+        if response.response_json:
+            finish_reason = _get_finish_reason(response.response_json)
+            truncation_indicators = ['length', 'max_tokens', 'max_token']
+            
+            if finish_reason and any(indicator in finish_reason for indicator in truncation_indicators):
+                logger.warning(f"Response from {model} truncated. Reason: {finish_reason}")
+        
     except Exception as e:
         logger.error(f"Error logging to database: {e}")
 
@@ -110,7 +145,6 @@ class IterationContext:
     def __init__(self, synthesis: Dict[str, Any], model_responses: List[Dict[str, Any]]):
         self.synthesis = synthesis
         self.model_responses = model_responses
-
 
 class ConsortiumConfig(BaseModel):
     models: List[str]
@@ -353,12 +387,11 @@ def read_stdin_if_not_tty() -> Optional[str]:
     return None
 
 class ConsortiumModel(llm.Model):
-    can_stream = True
+    can_stream = False
     
     class Options(llm.Options):
         confidence_threshold: Optional[float] = None
         max_iterations: Optional[int] = None
-        stream_individual_responses: bool = False
     
     def __init__(self, model_id: str, config: ConsortiumConfig):
         self.model_id = model_id
@@ -376,54 +409,13 @@ class ConsortiumModel(llm.Model):
                 raise llm.ModelError(f"Failed to initialize consortium: {e}")
         return self._orchestrator
 
-    async def execute(self, prompt, stream, response, conversation):
-        try:
-            orchestrator = self.get_orchestrator()
-            
-            # Apply runtime options
-            if self.Options.confidence_threshold is not None:
-                orchestrator.confidence_threshold = self.Options.confidence_threshold
-            if self.Options.max_iterations is not None:
-                orchestrator.max_iterations = self.Options.max_iterations
-            
-            result = await orchestrator.orchestrate(prompt.prompt)
-            
-            if stream:
-                if self.Options.stream_individual_responses:
-                    for model_response in result['model_responses']:
-                        yield f"[{model_response['model']}]: {model_response['response']}\n"
-                    yield "\nSynthesized response:\n"
-                yield result['synthesis']['synthesis']
-            else:
-                response.response_json = result
-                yield result["synthesis"]["synthesis"]
-                
-        except Exception as e:
-            raise llm.ModelError(f"Consortium execution failed: {e}")
-
     def execute(self, prompt, stream, response, conversation):
-        """Non-async execute method that handles the async orchestration internally"""
+        """Execute method that handles the async orchestration internally"""
         try:
             # Run the async orchestration synchronously
             result = asyncio.run(self.get_orchestrator().orchestrate(prompt.prompt))
-            click.echo(f"result: {result}")
-            if stream:
-                click.echo(f"Stream: {stream}")
-                # Get stream_individual_responses from options
-                stream_individual = self.Options.stream_individual_responses
-                click.echo(f"Stream individual responses: {stream_individual}")
-                if stream_individual:
-                    # Yield individual model responses
-                    for model_response in result['model_responses']:
-                        yield f"[{model_response['model']}]:\n"
-                        yield f"{model_response['response']}\n\n"
-                    yield "\nSynthesized response:\n"
-                
-                # Always yield the final synthesis
-                yield result['synthesis']['synthesis']
-            else:
-                response.response_json = result
-                yield result["synthesis"]["synthesis"]
+            response.response_json = result
+            return result["synthesis"]["synthesis"]
                 
         except Exception as e:
             raise llm.ModelError(f"Consortium execution failed: {e}")
@@ -461,16 +453,41 @@ def _save_consortium_config(name: str, config: ConsortiumConfig) -> None:
         {"name": name, "config": json.dumps(config.to_dict())}, replace=True
     )
         
+from click_default_group import DefaultGroup
+
+class DefaultToRunGroup(DefaultGroup):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set 'run' as the default command
+        self.default_cmd_name = 'run'
+        self.ignore_unknown_options = True
+
+    def get_command(self, ctx, cmd_name):
+        # Try to get the command normally
+        rv = super().get_command(ctx, cmd_name)
+        if rv is not None:
+            return rv
+        # If command not found, check if it's an option for the default command
+        if cmd_name.startswith('-'):
+            return super().get_command(ctx, self.default_cmd_name)
+        return None
+
+    def resolve_command(self, ctx, args):
+        # Handle the case where no command is provided
+        if not args:
+            args = [self.default_cmd_name]
+        return super().resolve_command(ctx, args)
+    
 @llm.hookimpl
 def register_commands(cli):
-    @cli.group()
-    def consortium():
+    @cli.group(cls=DefaultToRunGroup)
+    @click.pass_context
+    def consortium(ctx):
         """Commands for managing and running model consortiums"""
         pass
 
-    # Move run command under consortium group
     @consortium.command(name="run")
-    @click.argument("prompt")
+    @click.argument("prompt", required=False)
     @click.option(
         "-m",
         "--models",
@@ -517,11 +534,18 @@ def register_commands(cli):
     @click.option(
         "--raw",
         is_flag=True,
+        default=True,
         help="Output raw response from arbiter model",
     )
     def run_command(prompt, models, arbiter, confidence_threshold, max_iterations,
                    system, output, stdin, raw):
         """Run prompt through a consortium of models and synthesize results."""
+        # If no prompt is provided, read from stdin
+        if not prompt and stdin:
+            prompt = read_stdin_if_not_tty()
+            if not prompt:
+                raise click.UsageError("No prompt provided and no input from stdin")
+
         # Convert percentage to decimal if needed
         if confidence_threshold > 1.0:
             confidence_threshold /= 100.0
@@ -576,7 +600,7 @@ def register_commands(cli):
         except Exception as e:
             logger.exception("Error in consortium command")
             raise click.ClickException(str(e))
-
+        
     # Register consortium management commands group
     @consortium.command(name="save")
     @click.argument("name")
@@ -692,7 +716,6 @@ def register_commands(cli):
         except sqlite_utils.db.NotFoundError:
             raise click.ClickException(f"Consortium with name '{name}' not found.")
 
-
 @llm.hookimpl
 def register_models(register):
     logger.debug("KarpathyConsortiumPlugin.register_commands called")
@@ -716,4 +739,4 @@ logger.debug("llm_karpathy_consortium module finished loading")
 
 __all__ = ['KarpathyConsortiumPlugin', 'log_response', 'DatabaseConnection', 'logs_db_path', 'user_dir', 'ConsortiumModel']
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
