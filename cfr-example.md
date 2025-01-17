@@ -1,4 +1,6 @@
-Arbiter Response:
+## Prompt: "write a document about using CFR to optimise a multi-model llm agent"
+
+## Arbiter Response:
 
 <thought_process>
 ### Step 1: Analyze the Original Prompt and Responses
