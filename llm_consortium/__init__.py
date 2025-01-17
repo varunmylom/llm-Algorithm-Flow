@@ -12,7 +12,7 @@ import pathlib
 import sqlite_utils
 from pydantic import BaseModel
 
-# Todo: 
+# Todo:
 # "finish_reason": "length"
 # "finish_reason": "max_tokens"
 # "stop_reason": "max_tokens",
@@ -68,19 +68,19 @@ def logs_db_path() -> pathlib.Path:
 def setup_logging() -> None:
     """Configure logging to write to both file and console."""
     log_path = user_dir() / "consortium.log"
-    
+
     # Create a formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    
+
     # Console handler with ERROR level
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.ERROR)
     console_handler.setFormatter(formatter)
-    
+
     file_handler = logging.FileHandler(str(log_path))
     file_handler.setLevel(logging.ERROR)
     file_handler.setFormatter(formatter)
-    
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.ERROR)
@@ -94,10 +94,10 @@ logger.debug("llm_karpathy_consortium module is being imported")
 
 class DatabaseConnection:
     _instance: Optional['DatabaseConnection'] = None
-    
+
     def __init__(self):
         self.db = sqlite_utils.Database(logs_db_path())
-    
+
     @classmethod
     def get_connection(cls) -> sqlite_utils.Database:
         """Get singleton database connection."""
@@ -111,33 +111,33 @@ def _get_finish_reason(response_json: Dict[str, Any]) -> Optional[str]:
         return None
     # List of possible keys for finish reason (case-insensitive)
     reason_keys = ['finish_reason', 'finishReason', 'stop_reason']
-    
+
     # Convert response to lowercase for case-insensitive matching
     lower_response = {k.lower(): v for k, v in response_json.items()}
-    
+
     # Check each possible key
     for key in reason_keys:
         value = lower_response.get(key.lower())
         if value:
             return str(value).lower()
-    
+
     return None
 
-def log_response(response, model):
+async def log_response(response, model):
     """Log model response to database and log file."""
     try:
         db = DatabaseConnection.get_connection()
         response.log_to_db(db)
         logger.debug(f"Response from {model} logged to database")
-        
+
         # Check for truncation in various formats
         if response.response_json:
             finish_reason = _get_finish_reason(response.response_json)
             truncation_indicators = ['length', 'max_tokens', 'max_token']
-            
+
             if finish_reason and any(indicator in finish_reason for indicator in truncation_indicators):
                 logger.warning(f"Response from {model} truncated. Reason: {finish_reason}")
-        
+
     except Exception as e:
         logger.error(f"Error logging to database: {e}")
 
@@ -155,7 +155,7 @@ class ConsortiumConfig(BaseModel):
 
     def to_dict(self):
         return self.model_dump()
-    
+
     @classmethod
     def from_dict(cls, data):
         return cls(**data)
@@ -168,7 +168,7 @@ class ConsortiumOrchestrator:
         self.max_iterations = config.max_iterations
         self.arbiter = config.arbiter or "claude-3-opus-20240229"
         self.iteration_history: List[IterationContext] = []
-        
+
 
     async def orchestrate(self, prompt: str) -> Dict[str, Any]:
         iteration_count = 0
@@ -224,11 +224,15 @@ class ConsortiumOrchestrator:
     <instruction>{prompt}</instruction>
 </prompt>"""
             response = llm.get_model(model).prompt(xml_prompt, system=self.system_prompt)
-            log_response(response, model)
+
+            # Await the text from the response.
+            text = await response.text()
+            asyncio.create_task(log_response(response, model))
+
             return {
                 "model": model,
-                "response": response.text(),
-                "confidence": self._extract_confidence(response.text()),
+                "response": text,
+                "confidence": self._extract_confidence(text),
             }
         except Exception as e:
             logger.exception(f"Error getting response from {model}")
@@ -244,7 +248,7 @@ class ConsortiumOrchestrator:
                 return value / 100 if value > 1 else value
             except ValueError:
                 pass
-        
+
         # Fallback to plain text parsing
         for line in text.lower().split("\n"):
             if "confidence:" in line or "confidence level:" in line:
@@ -255,7 +259,7 @@ class ConsortiumOrchestrator:
                         return num / 100 if num > 1 else num
                 except (IndexError, ValueError):
                     pass
-        
+
         return default
 
     def _extract_confidence(self, text: str) -> float:
@@ -265,7 +269,7 @@ class ConsortiumOrchestrator:
         """Construct the prompt for the next iteration."""
         iteration_prompt_template = _read_iteration_prompt()
         iteration_history = self._format_iteration_history()
-        
+
         # Create the formatted prompt directly
         return f"""Refining response for original prompt:
 {original_prompt}
@@ -285,7 +289,7 @@ Please provide an improved response that addresses any issues identified in the 
                 f"<model_response>{r['model']}: {r.get('response', 'Error')}</model_response>"
                 for r in iteration.model_responses
             )
-            
+
             history.append(f"""<iteration>
             <iteration_number>{i}</iteration_number>
             <model_responses>
@@ -315,10 +319,10 @@ Please provide an improved response that addresses any issues identified in the 
     async def _synthesize_responses(self, original_prompt: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
         logger.debug("Synthesizing responses")
         arbiter = llm.get_model(self.arbiter)
-        
+
         formatted_history = self._format_iteration_history()
         formatted_responses = self._format_responses(responses)
-        
+
         # Load and format the arbiter prompt template
         arbiter_prompt_template = _read_arbiter_prompt()
         arbiter_prompt = arbiter_prompt_template.format(
@@ -328,19 +332,20 @@ Please provide an improved response that addresses any issues identified in the 
         )
 
         arbiter_response = arbiter.prompt(arbiter_prompt)
-        log_response(arbiter_response, arbiter)
-        
+        asyncio.create_task(log_response(arbiter_response, arbiter))
+
         # Print raw arbiter response
         click.echo("\nArbiter Response:\n")
-        click.echo(arbiter_response.text())
+        click.echo(await arbiter_response.text())
         click.echo("\n---\n")
 
+
         try:
-            return self._parse_arbiter_response(arbiter_response.text())
+            return self._parse_arbiter_response(await arbiter_response.text())
         except Exception as e:
             logger.error(f"Error parsing arbiter response: {e}")
             return {
-                "synthesis": arbiter_response.text(),
+                "synthesis": await arbiter_response.text(),
                 "confidence": 0.5,
                 "analysis": "Parsing failed - see raw response",
                 "dissent": "",
@@ -373,9 +378,7 @@ Please provide an improved response that addresses any issues identified in the 
                 elif key == "refinement_areas":
                     result[key] = [area.strip() for area in match.group(1).split("\n") if area.strip()]
                 else:
-                    result[key] = match.group(1).strip()
-            else:
-                result[key] = "" if key != "confidence" else 0.5
+                    result[key] = "" if key != "confidence" else 0.5
 
         return result
 
@@ -388,19 +391,19 @@ def read_stdin_if_not_tty() -> Optional[str]:
 
 class ConsortiumModel(llm.Model):
     can_stream = False
-    
+
     class Options(llm.Options):
         confidence_threshold: Optional[float] = None
         max_iterations: Optional[int] = None
-    
+
     def __init__(self, model_id: str, config: ConsortiumConfig):
         self.model_id = model_id
         self.config = config
         self._orchestrator = None  # Lazy initialization
-    
+
     def __str__(self):
         return f"Consortium Model: {self.model_id}"
-    
+
     def get_orchestrator(self):
         if self._orchestrator is None:
             try:
@@ -413,17 +416,18 @@ class ConsortiumModel(llm.Model):
         """Execute method that handles the async orchestration internally"""
         try:
             # Run the async orchestration synchronously
-            result = asyncio.run(self.get_orchestrator().orchestrate(prompt.prompt))
+            loop = asyncio.get_event_loop()
+            result = loop.run_until_complete(self.get_orchestrator().orchestrate(prompt.prompt))
             response.response_json = result
             return result["synthesis"]["synthesis"]
-                
+
         except Exception as e:
             raise llm.ModelError(f"Consortium execution failed: {e}")
 
 def _get_consortium_configs() -> Dict[str, ConsortiumConfig]:
     """Fetch saved consortium configurations from the database."""
     db = DatabaseConnection.get_connection()
-    
+
     db.execute("""
         CREATE TABLE IF NOT EXISTS consortium_configs (
             name TEXT PRIMARY KEY,
@@ -431,7 +435,7 @@ def _get_consortium_configs() -> Dict[str, ConsortiumConfig]:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
+
     configs = {}
     for row in db["consortium_configs"].rows:
         config_name = row["name"]
@@ -452,7 +456,7 @@ def _save_consortium_config(name: str, config: ConsortiumConfig) -> None:
     db["consortium_configs"].insert(
         {"name": name, "config": json.dumps(config.to_dict())}, replace=True
     )
-        
+
 from click_default_group import DefaultGroup
 
 class DefaultToRunGroup(DefaultGroup):
@@ -477,7 +481,7 @@ class DefaultToRunGroup(DefaultGroup):
         if not args:
             args = [self.default_cmd_name]
         return super().resolve_command(ctx, args)
-    
+
 @llm.hookimpl
 def register_commands(cli):
     @cli.group(cls=DefaultToRunGroup)
@@ -554,11 +558,11 @@ def register_commands(cli):
             stdin_content = read_stdin_if_not_tty()
             if stdin_content:
                 prompt = f"{prompt}\n\n{stdin_content}"
-        
+
         logger.info(f"Starting consortium with {len(models)} models")
         logger.debug(f"Models: {', '.join(models)}")
         logger.debug(f"Arbiter model: {arbiter}")
-        
+
         orchestrator = ConsortiumOrchestrator(
             config=ConsortiumConfig(
                models=list(models),
@@ -568,39 +572,40 @@ def register_commands(cli):
                arbiter=arbiter,
             )
         )
-        
+
         try:
-            result = asyncio.run(orchestrator.orchestrate(prompt))
-            
+            loop = asyncio.get_event_loop()
+            result = loop.run_until_complete(orchestrator.orchestrate(prompt))
+
             if output:
                 with open(output, 'w') as f:
                     json.dump(result, f, indent=2)
                 logger.info(f"Results saved to {output}")
-            
+
             click.echo("\nSynthesized response:\n")
             click.echo(result["synthesis"]["synthesis"])
-            
+
             click.echo(f"\nConfidence: {result['synthesis']['confidence']}")
-            
+
             click.echo("\nAnalysis:")
             click.echo(result["synthesis"]["analysis"])
-            
+
             if result["synthesis"]["dissent"]:
                 click.echo("\nNotable dissenting views:")
                 click.echo(result["synthesis"]["dissent"])
-            
+
             click.echo(f"\nNumber of iterations: {result['metadata']['iteration_count']}")
-            if raw:            
+            if raw:
                 click.echo("\nIndividual model responses:")
                 for response in result["model_responses"]:
                     click.echo(f"\nModel: {response['model']}")
                     click.echo(f"Confidence: {response.get('confidence', 'N/A')}")
                     click.echo(f"Response: {response.get('response', 'Error: ' + response.get('error', 'Unknown error'))}")
-                
+
         except Exception as e:
             logger.exception("Error in consortium command")
             raise click.ClickException(str(e))
-        
+
     # Register consortium management commands group
     @consortium.command(name="save")
     @click.argument("name")
@@ -649,7 +654,7 @@ def register_commands(cli):
     def list_command():
         """List all saved consortiums."""
         db = DatabaseConnection.get_connection()
-        
+
         db.execute("""
         CREATE TABLE IF NOT EXISTS consortium_configs (
             name TEXT PRIMARY KEY,
@@ -657,7 +662,7 @@ def register_commands(cli):
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """)
-        
+
         consortiums = list(db["consortium_configs"].rows)
         if not consortiums:
             click.echo("No consortiums found.")
@@ -672,7 +677,7 @@ def register_commands(cli):
     def show_command(name):
         """Show details of a saved consortium."""
         db = DatabaseConnection.get_connection()
-        
+
         db.execute("""
         CREATE TABLE IF NOT EXISTS consortium_configs (
             name TEXT PRIMARY KEY,
@@ -684,7 +689,7 @@ def register_commands(cli):
             consortium_config = db["consortium_configs"].get(name)
             if not consortium_config:
                raise click.ClickException(f"Consortium with name '{name}' not found.")
-            
+
             config_data = json.loads(consortium_config['config'])
             config = ConsortiumConfig.from_dict(config_data)
 
