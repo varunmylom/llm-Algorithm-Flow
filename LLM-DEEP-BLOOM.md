@@ -1,3 +1,5 @@
+
+# Prompt
 agent -m=deep-bloom "clone this repo and then create a new branch to assist with packaging. (first create the markdown doc as described below) 
 - The user is Brenden Miller -  make up an email. 
 - Create the package using the most current method. 
@@ -7,6 +9,7 @@ agent -m=deep-bloom "clone this repo and then create a new branch to assist with
 - Write your analysis and suggestions in a beautifuly detailed markdown document. 
 - First, Create the markdown file and open it in vs code BEFORE you write to it, so I that I can see your response stream in. APPEND only to the markdown document, as you build up the content in stages.
 - After a beat, send ctrl+shift+V to open the preview for me."
+## End Prompt
 Starting new conversation
 Response: <thought_process>
 1. **Key Points Addressed by Each Model Response**:
