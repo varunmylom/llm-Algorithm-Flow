@@ -34,6 +34,14 @@ flowchart TD
 - **Hundreds of Models**: Supports all models available via llm plugins
 - **Save and Load Consortium Configurations**: Save your favorite model configurations to reuse later.
 
+## New Features
+
+- **Enhanced Model Selection**: Added support for the latest models including `claude-3-5-sonnet-20240620` and `deepseek-chat`.
+- **Improved Confidence Calculation**: Refined the confidence threshold algorithm for better accuracy.
+- **Extended Logging**: Added more detailed logging options for debugging and analysis.
+- **User Feedback Integration**: Implemented a feedback loop to incorporate user input into the refinement process.
+- **Performance Optimization**: Improved the speed and efficiency of the orchestration process.
+
 ## Installation
 First, get https://github.com/simonw/llm
 
