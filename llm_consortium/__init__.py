@@ -1,7 +1,6 @@
 import click
 import json
 import llm
-import asyncio
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import logging
@@ -123,7 +122,7 @@ def _get_finish_reason(response_json: Dict[str, Any]) -> Optional[str]:
 
     return None
 
-async def log_response(response, model):
+def log_response(response, model):
     """Log model response to database and log file."""
     try:
         db = DatabaseConnection.get_connection()
@@ -147,10 +146,11 @@ class IterationContext:
         self.model_responses = model_responses
 
 class ConsortiumConfig(BaseModel):
-    models: List[str]
+    models: Dict[str, int]  # Maps model names to instance counts
     system_prompt: Optional[str] = None
     confidence_threshold: float = 0.8
     max_iterations: int = 3
+    minimum_iterations: int = 1
     arbiter: Optional[str] = None
 
     def to_dict(self):
@@ -166,11 +166,11 @@ class ConsortiumOrchestrator:
         self.system_prompt = config.system_prompt or DEFAULT_SYSTEM_PROMPT
         self.confidence_threshold = config.confidence_threshold
         self.max_iterations = config.max_iterations
+        self.minimum_iterations = config.minimum_iterations
         self.arbiter = config.arbiter or "claude-3-opus-20240229"
         self.iteration_history: List[IterationContext] = []
 
-
-    async def orchestrate(self, prompt: str) -> Dict[str, Any]:
+    def orchestrate(self, prompt: str) -> Dict[str, Any]:
         iteration_count = 0
         final_result = None
         original_prompt = prompt
@@ -178,20 +178,20 @@ class ConsortiumOrchestrator:
     <instruction>{prompt}</instruction>
 </prompt>"""
 
-        while iteration_count < self.max_iterations:
+        while iteration_count < self.max_iterations or iteration_count < self.minimum_iterations:
             iteration_count += 1
             logger.debug(f"Starting iteration {iteration_count}")
 
             # Get responses from all models using the current prompt
-            model_responses = await self._get_model_responses(current_prompt)
+            model_responses = self._get_model_responses(current_prompt)
 
             # Have arbiter synthesize and evaluate responses
-            synthesis = await self._synthesize_responses(original_prompt, model_responses)
+            synthesis = self._synthesize_responses(original_prompt, model_responses)
 
             # Store iteration context
             self.iteration_history.append(IterationContext(synthesis, model_responses))
 
-            if synthesis["confidence"] >= self.confidence_threshold:
+            if synthesis["confidence"] >= self.confidence_threshold and iteration_count >= self.minimum_iterations:
                 final_result = synthesis
                 break
 
@@ -213,30 +213,34 @@ class ConsortiumOrchestrator:
             }
         }
 
-    async def _get_model_responses(self, prompt: str) -> List[Dict[str, Any]]:
-        tasks = [self._get_model_response(model, prompt) for model in self.models]
-        return await asyncio.gather(*tasks)
+    def _get_model_responses(self, prompt: str) -> List[Dict[str, Any]]:
+        responses = []
+        for model, count in self.models.items():
+            for instance in range(count):
+                responses.append(self._get_model_response(model, prompt, instance))
+        return responses
 
-    async def _get_model_response(self, model: str, prompt: str) -> Dict[str, Any]:
-        logger.debug(f"Getting response from model: {model}")
+    def _get_model_response(self, model: str, prompt: str, instance: int) -> Dict[str, Any]:
+        logger.debug(f"Getting response from model: {model} instance {instance + 1}")
         try:
             xml_prompt = f"""<prompt>
     <instruction>{prompt}</instruction>
 </prompt>"""
             response = llm.get_model(model).prompt(xml_prompt, system=self.system_prompt)
 
-            # Await the text from the response.
-            text = await response.text()
-            asyncio.create_task(log_response(response, model))
+            # Get text from response
+            text = response.text()
+            log_response(response, f"{model}-{instance + 1}")
 
             return {
                 "model": model,
+                "instance": instance + 1,
                 "response": text,
                 "confidence": self._extract_confidence(text),
             }
         except Exception as e:
-            logger.exception(f"Error getting response from {model}")
-            return {"model": model, "error": str(e)}
+            logger.exception(f"Error getting response from {model} instance {instance + 1}")
+            return {"model": model, "instance": instance + 1, "error": str(e)}
 
     def _parse_confidence_value(self, text: str, default: float = 0.5) -> float:
         """Helper method to parse confidence values consistently."""
@@ -311,12 +315,13 @@ Please provide an improved response that addresses any issues identified in the 
         for r in responses:
             formatted.append(f"""<model_response>
             <model>{r['model']}</model>
+            <instance>{r.get('instance', 1)}</instance>
             <confidence>{r.get('confidence', 'N/A')}</confidence>
             <response>{r.get('response', 'Error: ' + r.get('error', 'Unknown error'))}</response>
         </model_response>""")
         return "\n".join(formatted)
 
-    async def _synthesize_responses(self, original_prompt: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _synthesize_responses(self, original_prompt: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
         logger.debug("Synthesizing responses")
         arbiter = llm.get_model(self.arbiter)
 
@@ -332,20 +337,17 @@ Please provide an improved response that addresses any issues identified in the 
         )
 
         arbiter_response = arbiter.prompt(arbiter_prompt)
-        asyncio.create_task(log_response(arbiter_response, arbiter))
+        log_response(arbiter_response, arbiter)
 
         # Print raw arbiter response
-        click.echo("\nArbiter Response:\n")
-        click.echo(await arbiter_response.text())
-        click.echo("\n---\n")
-
+        # click.echo(arbiter_response.text())
 
         try:
-            return self._parse_arbiter_response(await arbiter_response.text())
+            return self._parse_arbiter_response(arbiter_response.text())
         except Exception as e:
             logger.error(f"Error parsing arbiter response: {e}")
             return {
-                "synthesis": await arbiter_response.text(),
+                "synthesis": arbiter_response.text(),
                 "confidence": 0.5,
                 "analysis": "Parsing failed - see raw response",
                 "dissent": "",
@@ -353,7 +355,8 @@ Please provide an improved response that addresses any issues identified in the 
                 "refinement_areas": []
             }
 
-    def _parse_arbiter_response(self, text: str) -> Dict[str, Any]:
+    def _parse_arbiter_response(self, text: str, is_final_iteration: bool = False) -> Dict[str, Any]:
+        """Parse arbiter response with special handling for final iteration."""
         sections = {
             "synthesis": r"<synthesis>([\s\S]*?)</synthesis>",
             "confidence": r"<confidence>\s*([\d.]+)\s*</confidence>",
@@ -378,11 +381,33 @@ Please provide an improved response that addresses any issues identified in the 
                 elif key == "refinement_areas":
                     result[key] = [area.strip() for area in match.group(1).split("\n") if area.strip()]
                 else:
-                    result[key] = "" if key != "confidence" else 0.5
+                    result[key] = match.group(1).strip()
+
+        # For final iteration, extract clean text response
+        if is_final_iteration:
+            clean_text = result.get("synthesis", "")
+            # Remove any remaining XML tags
+            clean_text = re.sub(r"<[^>]+>", "", clean_text).strip()
+            result["clean_text"] = clean_text
 
         return result
 
-# Add this helper function before the register_commands
+def parse_models(models: List[str], count: int) -> Dict[str, int]:
+    """Parse models and counts from CLI arguments into a dictionary."""
+    model_dict = {}
+    
+    for item in models:
+        if ':' in item:
+            try:
+                model_name, model_count = item.split(':')
+                model_dict[model_name] = int(model_count)
+            except ValueError:
+                raise ValueError(f"Invalid model specification: {item}")
+        else:
+            model_dict[item] = count
+    
+    return model_dict
+
 def read_stdin_if_not_tty() -> Optional[str]:
     """Read from stdin if it's not a terminal."""
     if not sys.stdin.isatty():
@@ -413,11 +438,9 @@ class ConsortiumModel(llm.Model):
         return self._orchestrator
 
     def execute(self, prompt, stream, response, conversation):
-        """Execute method that handles the async orchestration internally"""
+        """Execute the consortium synchronously"""
         try:
-            # Run the async orchestration synchronously
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(self.get_orchestrator().orchestrate(prompt.prompt))
+            result = self.get_orchestrator().orchestrate(prompt.prompt)
             response.response_json = result
             return result["synthesis"]["synthesis"]
 
@@ -496,13 +519,15 @@ def register_commands(cli):
         "-m",
         "--models",
         multiple=True,
-        help="Models to include in consortium (can specify multiple)",
-        default=[
-            "claude-3-opus-20240229",
-            "claude-3-sonnet-20240229",
-            "gpt-4",
-            "gemini-pro"
-        ],
+        help="Models to include in consortium (can specify multiple, e.g., 'model:count' or '-m model1 -m model2')",
+        default=["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4", "gemini-pro"],
+    )
+    @click.option(
+        "-n",
+        "--count",
+        type=int,
+        default=1,
+        help="Number of instances to run for each model (used with separate -m flags)",
     )
     @click.option(
         "--arbiter",
@@ -522,6 +547,12 @@ def register_commands(cli):
         default=3
     )
     @click.option(
+        "--minimum-iterations",
+        type=int,
+        help="Minimum number of iterations to perform",
+        default=1
+    )
+    @click.option(
         "--system",
         help="System prompt to use",
     )
@@ -538,12 +569,18 @@ def register_commands(cli):
     @click.option(
         "--raw",
         is_flag=True,
-        default=True,
+        default=False,
         help="Output raw response from arbiter model",
     )
-    def run_command(prompt, models, arbiter, confidence_threshold, max_iterations,
-                   system, output, stdin, raw):
+    def run_command(prompt, models, count, arbiter, confidence_threshold, max_iterations,
+                   minimum_iterations, system, output, stdin, raw):
         """Run prompt through a consortium of models and synthesize results."""
+        # Parse models and counts
+        try:
+            model_dict = parse_models(models, count)
+        except ValueError as e:
+            raise click.ClickException(str(e))
+
         # If no prompt is provided, read from stdin
         if not prompt and stdin:
             prompt = read_stdin_if_not_tty()
@@ -559,46 +596,35 @@ def register_commands(cli):
             if stdin_content:
                 prompt = f"{prompt}\n\n{stdin_content}"
 
-        logger.info(f"Starting consortium with {len(models)} models")
-        logger.debug(f"Models: {', '.join(models)}")
+        logger.info(f"Starting consortium with {len(model_dict)} models")
+        logger.debug(f"Models: {', '.join(f'{k}:{v}' for k, v in model_dict.items())}")
         logger.debug(f"Arbiter model: {arbiter}")
 
         orchestrator = ConsortiumOrchestrator(
             config=ConsortiumConfig(
-               models=list(models),
+               models=model_dict,
                system_prompt=system,
                confidence_threshold=confidence_threshold,
                max_iterations=max_iterations,
+               minimum_iterations=minimum_iterations,
                arbiter=arbiter,
             )
         )
 
         try:
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(orchestrator.orchestrate(prompt))
+            result = orchestrator.orchestrate(prompt)
 
             if output:
                 with open(output, 'w') as f:
                     json.dump(result, f, indent=2)
                 logger.info(f"Results saved to {output}")
 
-            click.echo("\nSynthesized response:\n")
             click.echo(result["synthesis"]["synthesis"])
 
-            click.echo(f"\nConfidence: {result['synthesis']['confidence']}")
-
-            click.echo("\nAnalysis:")
-            click.echo(result["synthesis"]["analysis"])
-
-            if result["synthesis"]["dissent"]:
-                click.echo("\nNotable dissenting views:")
-                click.echo(result["synthesis"]["dissent"])
-
-            click.echo(f"\nNumber of iterations: {result['metadata']['iteration_count']}")
             if raw:
                 click.echo("\nIndividual model responses:")
                 for response in result["model_responses"]:
-                    click.echo(f"\nModel: {response['model']}")
+                    click.echo(f"\nModel: {response['model']} (Instance {response.get('instance', 1)})")
                     click.echo(f"Confidence: {response.get('confidence', 'N/A')}")
                     click.echo(f"Response: {response.get('response', 'Error: ' + response.get('error', 'Unknown error'))}")
 
@@ -613,8 +639,15 @@ def register_commands(cli):
         "-m",
         "--models",
         multiple=True,
-        help="Models to include in consortium (can specify multiple)",
+        help="Models to include in consortium (can specify multiple, e.g., 'model:count' or '-m model1 -m model2')",
         required=True,
+    )
+    @click.option(
+        "-n",
+        "--count",
+        type=int,
+        default=1,
+        help="Number of instances to run for each model (used with separate -m flags)",
     )
     @click.option(
         "--arbiter",
@@ -634,25 +667,37 @@ def register_commands(cli):
         default=3
     )
     @click.option(
+        "--minimum-iterations",
+        type=int,
+        help="Minimum number of iterations to perform",
+        default=1
+    )
+    @click.option(
         "--system",
         help="System prompt to use",
     )
-    def save_command(name, models, arbiter, confidence_threshold, max_iterations, system):
+    def save_command(name, models, count, arbiter, confidence_threshold, max_iterations,
+                    minimum_iterations, system):
         """Save a consortium configuration."""
+        try:
+            model_dict = parse_models(models, count)
+        except ValueError as e:
+            raise click.ClickException(str(e))
+
         config = ConsortiumConfig(
-            models=models,
+            models=model_dict,
             arbiter=arbiter,
             confidence_threshold=confidence_threshold,
             max_iterations=max_iterations,
+            minimum_iterations=minimum_iterations,
             system_prompt=system,
         )
         _save_consortium_config(name, config)
         click.echo(f"Consortium configuration '{name}' saved.")
-        click.echo("Options: --option confidence_threshold=0.9 --option stream_individual_responses=true")
 
     @consortium.command(name="list")
     def list_command():
-        """List all saved consortiums."""
+        """List all saved consortiums with their details."""
         db = DatabaseConnection.get_connection()
 
         db.execute("""
@@ -668,40 +713,22 @@ def register_commands(cli):
             click.echo("No consortiums found.")
             return
 
-        click.echo("Available consortiums:")
+        click.echo("Available consortiums:\n")
         for row in consortiums:
-            click.echo(f"- {row['name']}")
+            try:
+                config_data = json.loads(row['config'])
+                config = ConsortiumConfig.from_dict(config_data)
 
-    @consortium.command(name="show")
-    @click.argument("name")
-    def show_command(name):
-        """Show details of a saved consortium."""
-        db = DatabaseConnection.get_connection()
-
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS consortium_configs (
-            name TEXT PRIMARY KEY,
-            config TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        try:
-            consortium_config = db["consortium_configs"].get(name)
-            if not consortium_config:
-               raise click.ClickException(f"Consortium with name '{name}' not found.")
-
-            config_data = json.loads(consortium_config['config'])
-            config = ConsortiumConfig.from_dict(config_data)
-
-            click.echo(f"Consortium: {name}")
-            click.echo(f"  Models: {', '.join(config.models)}")
-            click.echo(f"  Arbiter: {config.arbiter}")
-            click.echo(f"  Confidence Threshold: {config.confidence_threshold}")
-            click.echo(f"  Max Iterations: {config.max_iterations}")
-            if config.system_prompt:
-                click.echo(f"  System Prompt: {config.system_prompt}")
-        except sqlite_utils.db.NotFoundError:
-            raise click.ClickException(f"Consortium with name '{name}' not found.")
+                click.echo(f"Consortium: {row['name']}")
+                click.echo(f"  Models: {', '.join(f'{k}:{v}' for k, v in config.models.items())}")
+                click.echo(f"  Arbiter: {config.arbiter}")
+                click.echo(f"  Confidence Threshold: {config.confidence_threshold}")
+                click.echo(f"  Max Iterations: {config.max_iterations}")
+                if config.system_prompt:
+                    click.echo(f"  System Prompt: {config.system_prompt}")
+                click.echo("")  # Empty line between consortiums
+            except Exception as e:
+                click.echo(f"Error loading consortium '{row['name']}': {e}")
 
     @consortium.command(name="remove")
     @click.argument("name")

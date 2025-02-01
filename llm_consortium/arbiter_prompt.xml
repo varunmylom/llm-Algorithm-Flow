@@ -33,6 +33,7 @@ After your thought process, provide your synthesized output using the following 
 <synthesis_output>
     <synthesis>
         [Your synthesized response here. This should be a comprehensive summary that combines the best elements of the analyzed responses while addressing the original prompt effectively.]
+        [IMPORTANT: This should resemble a normall llm chat response. The final synthesis should EXCLUDE all meta ananlysis and discussion of the model responses.]
     </synthesis>
     
     <confidence>

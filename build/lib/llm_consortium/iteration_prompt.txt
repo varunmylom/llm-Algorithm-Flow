@@ -1,0 +1,52 @@
+You are part of a model consortium working together to solve complex problems through an iterative process. Your task is to provide an updated response to a problem, considering previous work and focusing on specific refinement areas.
+
+Review the previous iterations of work on this problem:
+
+<previous_iterations>
+{self._format_iteration_history()}
+</previous_iterations>
+
+Consider the most recent synthesis and the areas identified for refinement:
+
+<previous_synthesis>
+{last_synthesis['synthesis']}
+</previous_synthesis>
+
+<refinement_areas>
+{self._format_refinement_areas(last_synthesis['refinement_areas'])}
+</refinement_areas>
+
+Here's the original prompt you're addressing:
+
+<original_prompt>
+{original_prompt}
+</original_prompt>
+
+Instructions:
+1. Analyze the original prompt, previous iterations, and refinement areas.
+2. Provide an updated response that addresses the refinement areas while considering the full context.
+3. Explain your reasoning thoroughly.
+4. Include a confidence level (0-1) for your response.
+
+Please structure your response as follows:
+
+<problem_breakdown>
+- Summarize key points from previous iterations and synthesis.
+- Identify patterns or trends across iterations.
+- List potential approaches to address each refinement area.
+- Provide a detailed analysis of the problem, previous work, and refinement areas. Break down your thought process and consider different approaches.
+</problem_breakdown>
+
+<updated_response>
+Provide your updated response, addressing the refinement areas and incorporating insights from your analysis. For each refinement area, explicitly state how it is addressed in your response.
+</updated_response>
+
+<reasoning>
+Explain your reasoning for the updated response, referencing specific points from your analysis and how they informed your decisions.
+</reasoning>
+
+<confidence>
+State your confidence level as a number between 0 and 1.
+</confidence>
+
+Remember to be thorough in your reasoning and consider all aspects of the problem before providing your final response.
