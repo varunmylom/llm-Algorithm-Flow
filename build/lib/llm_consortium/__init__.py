@@ -163,7 +163,8 @@ class ConsortiumConfig(BaseModel):
 class ConsortiumOrchestrator:
     def __init__(self, config: ConsortiumConfig):
         self.models = config.models
-        self.system_prompt = config.system_prompt or DEFAULT_SYSTEM_PROMPT
+        # Retain system_prompt from config for backwards compatibility, but do not pass it separately.
+        self.system_prompt = config.system_prompt  
         self.confidence_threshold = config.confidence_threshold
         self.max_iterations = config.max_iterations
         self.minimum_iterations = config.minimum_iterations
@@ -174,8 +175,14 @@ class ConsortiumOrchestrator:
         iteration_count = 0
         final_result = None
         original_prompt = prompt
+        # Incorporate system instructions into the user prompt if available.
+        if self.system_prompt:
+            combined_prompt = f"[SYSTEM INSTRUCTIONS]\n{self.system_prompt}\n[/SYSTEM INSTRUCTIONS]\n\n{original_prompt}"
+        else:
+            combined_prompt = original_prompt
+
         current_prompt = f"""<prompt>
-    <instruction>{prompt}</instruction>
+    <instruction>{combined_prompt}</instruction>
 </prompt>"""
 
         while iteration_count < self.max_iterations or iteration_count < self.minimum_iterations:
@@ -226,7 +233,8 @@ class ConsortiumOrchestrator:
             xml_prompt = f"""<prompt>
     <instruction>{prompt}</instruction>
 </prompt>"""
-            response = llm.get_model(model).prompt(xml_prompt, system=self.system_prompt)
+            # Pass only the user prompt (which contains system instructions)
+            response = llm.get_model(model).prompt(xml_prompt)
 
             # Get text from response
             text = response.text()
