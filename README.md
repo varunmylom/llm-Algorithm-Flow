@@ -171,10 +171,10 @@ All interactions are automatically logged to a SQLite database located in the LL
 from llm_consortium import ConsortiumOrchestrator
 
 orchestrator = ConsortiumOrchestrator(
-    models=["claude-3-opus-20240229", "gpt-4", "gemini-pro"],
-    confidence_threshold=0.8,
+    models=["o3-mini", "gpt-4o", "gemini-2"],
+    confidence_threshold=0.9,
     max_iterations=3,
-    arbiter="claude-3-opus-20240229"
+    arbiter="gemini-2"
 )
 
 result = await orchestrator.orchestrate("Your prompt")
