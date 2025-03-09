@@ -15,18 +15,20 @@ Please follow these steps to complete your task:
 3. Compare and contrast the key points from different responses.
 4. Evaluate the relevance of each response to the original prompt.
 5. Identify areas of agreement and disagreement among the responses.
-6. Synthesize a final response that represents the best consensus.
+6. Synthesize a final response that represents the most likely best answer.
 7. Determine your confidence level in the synthesized response.
 8. Highlight any important dissenting views.
 9. Assess whether further iterations are needed.
-10. If further iterations are needed, provide recommendations for refinement areas.
+10. If further iterations are needed, provide recommendations for refinement areas or suggest unexplored angles.
 
-Wrap your thought process inside <thought_process> tags before providing the final output. In your thought process, consider the following questions:
+Wrap your thought process inside <think> tags before providing the final output. In your thought process, consider the following questions:
 - What are the key points addressed by each model response?
 - How do the responses align or differ from each other?
 - What are the strengths and weaknesses of each response?
 - Are there any unique insights or perspectives offered by specific responses?
 - How well does each response address the original prompt?
+- If there is little diversity in responses, what additional information or perspective could be beneficial?
+- If model responses are very similar, only mention them briefly and focus on areas of divergence or where one response excels over others.
 
 After your thought process, provide your synthesized output using the following format:
 
@@ -60,5 +62,5 @@ After your thought process, provide your synthesized output using the following 
 
 Remember to maintain objectivity and consider all perspectives fairly in your analysis and synthesis. Your goal is to provide a comprehensive response that accurately represents the collective insights from the model responses while addressing the original prompt effectively.
 The goal of the llm-consortium is to improve the intelligence of the response generation model through iterative analysis and synthesis.
-There is no need to maintain impartiality or balance with regard to choosing answers from the consortium members. The focus should be on the quality of the response and the depth of analysis.
+There is no need to maintain impartiality or balance with regard to choosing answers from the consortium members. The focus should be on the raw intelligence and literary quality of the response and the depth of analysis.
 If one models response is significantly better than the others, it is acceptable to choose that response as the basis for the synthesis.

@@ -11,6 +11,8 @@ import pathlib
 import sqlite_utils
 from pydantic import BaseModel
 import time  # added import for time
+import concurrent.futures  # Add concurrent.futures for parallel processing
+import threading  # Add threading for thread-local storage
 
 # Todo:
 # "finish_reason": "length"
@@ -93,17 +95,14 @@ logger = logging.getLogger(__name__)
 logger.debug("llm_karpathy_consortium module is being imported")
 
 class DatabaseConnection:
-    _instance: Optional['DatabaseConnection'] = None
-
-    def __init__(self):
-        self.db = sqlite_utils.Database(logs_db_path())
+    _thread_local = threading.local()
 
     @classmethod
     def get_connection(cls) -> sqlite_utils.Database:
-        """Get singleton database connection."""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance.db
+        """Get thread-local database connection to ensure thread safety."""
+        if not hasattr(cls._thread_local, 'db'):
+            cls._thread_local.db = sqlite_utils.Database(logs_db_path())
+        return cls._thread_local.db
 
 def _get_finish_reason(response_json: Dict[str, Any]) -> Optional[str]:
     """Helper function to extract finish reason from various API response formats."""
@@ -171,6 +170,8 @@ class ConsortiumOrchestrator:
         self.minimum_iterations = config.minimum_iterations
         self.arbiter = config.arbiter or "claude-3-opus-20240229"
         self.iteration_history: List[IterationContext] = []
+        # New: Dictionary to track conversation IDs for each model instance
+        self.conversation_ids: Dict[str, str] = {}
 
     def orchestrate(self, prompt: str) -> Dict[str, Any]:
         iteration_count = 0
@@ -223,21 +224,50 @@ class ConsortiumOrchestrator:
 
     def _get_model_responses(self, prompt: str) -> List[Dict[str, Any]]:
         responses = []
-        for model, count in self.models.items():
-            for instance in range(count):
-                responses.append(self._get_model_response(model, prompt, instance))
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            for model, count in self.models.items():
+                for instance in range(count):
+                    futures.append(
+                        executor.submit(self._get_model_response, model, prompt, instance)
+                    )
+            
+            # Gather all results as they complete
+            for future in concurrent.futures.as_completed(futures):
+                responses.append(future.result())
+                
         return responses
 
     def _get_model_response(self, model: str, prompt: str, instance: int) -> Dict[str, Any]:
         logger.debug(f"Getting response from model: {model} instance {instance + 1}")
         attempts = 0
         max_retries = 3
+        
+        # Generate a unique key for this model instance
+        instance_key = f"{model}-{instance}"
+        
         while attempts < max_retries:
             try:
                 xml_prompt = f"""<prompt>
     <instruction>{prompt}</instruction>
 </prompt>"""
-                response = llm.get_model(model).prompt(xml_prompt)
+                
+                # Check if we have an existing conversation for this model instance
+                conversation_id = self.conversation_ids.get(instance_key)
+                
+                # If we have a conversation_id, continue that conversation
+                if conversation_id:
+                    response = llm.get_model(model).prompt(
+                        xml_prompt,
+                        conversation_id=conversation_id
+                    )
+                else:
+                    # Start a new conversation
+                    response = llm.get_model(model).prompt(xml_prompt)
+                    # Store the conversation_id for future iterations
+                    if hasattr(response, 'conversation_id') and response.conversation_id:
+                        self.conversation_ids[instance_key] = response.conversation_id
+                
                 text = response.text()
                 log_response(response, f"{model}-{instance + 1}")
                 return {
@@ -245,6 +275,7 @@ class ConsortiumOrchestrator:
                     "instance": instance + 1,
                     "response": text,
                     "confidence": self._extract_confidence(text),
+                    "conversation_id": getattr(response, 'conversation_id', None)
                 }
             except Exception as e:
                 # Check if the error is a rate-limit error
@@ -287,20 +318,15 @@ class ConsortiumOrchestrator:
 
     def _construct_iteration_prompt(self, original_prompt: str, last_synthesis: Dict[str, Any]) -> str:
         """Construct the prompt for the next iteration."""
-        iteration_prompt_template = _read_iteration_prompt()
-        iteration_history = self._format_iteration_history()
-
-        # Create the formatted prompt directly
+        # Simplified prompt that doesn't need to include the full history
+        # since the conversation context is maintained by the provider
         return f"""Refining response for original prompt:
 {original_prompt}
 
-Previous synthesis results:
+Arbiter feedback from previous attempt:
 {json.dumps(last_synthesis, indent=2)}
 
-Previous iteration history:
-{iteration_history}
-
-Please provide an improved response that addresses any issues identified in the previous iterations."""
+Please improve your response based on this feedback."""
 
     def _format_iteration_history(self) -> str:
         history = []
@@ -413,14 +439,7 @@ def parse_models(models: List[str], count: int) -> Dict[str, int]:
     model_dict = {}
     
     for item in models:
-        if ':' in item:
-            try:
-                model_name, model_count = item.split(':')
-                model_dict[model_name] = int(model_count)
-            except ValueError:
-                raise ValueError(f"Invalid model specification: {item}")
-        else:
-            model_dict[item] = count
+        model_dict[item] = count
     
     return model_dict
 
@@ -521,6 +540,35 @@ class DefaultToRunGroup(DefaultGroup):
             args = [self.default_cmd_name]
         return super().resolve_command(ctx, args)
 
+def create_consortium(
+    models: list[str],
+    confidence_threshold: float = 0.8,
+    max_iterations: int = 3,
+    min_iterations: int = 1,
+    arbiter: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    default_count: int = 1,
+    raw: bool = False,
+) -> ConsortiumOrchestrator:
+    """
+    Create and return a ConsortiumOrchestrator with a simplified API.
+    - models: list of model names. To specify instance counts, use the format "model:count".
+    - system_prompt: if not provided, DEFAULT_SYSTEM_PROMPT is used.
+    """
+    model_dict = {}
+    for m in models:
+        model_dict[m] = default_count
+    config = ConsortiumConfig(
+        models=model_dict,
+        system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+        confidence_threshold=confidence_threshold,
+        max_iterations=max_iterations,
+        minimum_iterations=min_iterations,
+        arbiter=arbiter,
+        raw=raw,
+    )
+    return ConsortiumOrchestrator(config=config)
+
 @llm.hookimpl
 def register_commands(cli):
     @cli.group(cls=DefaultToRunGroup)
@@ -533,9 +581,9 @@ def register_commands(cli):
     @click.argument("prompt", required=False)
     @click.option(
         "-m",
-        "--models",
+        "--model", "models",  # store values in 'models'
         multiple=True,
-        help="Models to include in consortium (can specify multiple, e.g., 'model:count' or '-m model1 -m model2')",
+        help="Model to include in consortium (use format 'model -n count'; can specify multiple)",
         default=["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4", "gemini-pro"],
     )
     @click.option(
@@ -543,7 +591,7 @@ def register_commands(cli):
         "--count",
         type=int,
         default=1,
-        help="Number of instances to run for each model (used with separate -m flags)",
+        help="Number of instances (if count not specified per model)",
     )
     @click.option(
         "--arbiter",
@@ -563,7 +611,7 @@ def register_commands(cli):
         default=3
     )
     @click.option(
-        "--minimum-iterations",
+        "--min-iterations",
         type=int,
         help="Minimum number of iterations to perform",
         default=1
@@ -589,7 +637,7 @@ def register_commands(cli):
         help="Output raw response from arbiter model",
     )
     def run_command(prompt, models, count, arbiter, confidence_threshold, max_iterations,
-                   minimum_iterations, system, output, stdin, raw):
+                   min_iterations, system, output, stdin, raw):
         """Run prompt through a consortium of models and synthesize results."""
         # Parse models and counts
         try:
@@ -622,7 +670,7 @@ def register_commands(cli):
                system_prompt=system,
                confidence_threshold=confidence_threshold,
                max_iterations=max_iterations,
-               minimum_iterations=minimum_iterations,
+               minimum_iterations=min_iterations,
                arbiter=arbiter,
             )
         )
@@ -635,6 +683,8 @@ def register_commands(cli):
                     json.dump(result, f, indent=2)
                 logger.info(f"Results saved to {output}")
 
+            click.echo(result["synthesis"]["analysis"])
+            click.echo(result["synthesis"]["dissent"])
             click.echo(result["synthesis"]["synthesis"])
 
             if raw:
@@ -653,9 +703,9 @@ def register_commands(cli):
     @click.argument("name")
     @click.option(
         "-m",
-        "--models",
+        "--model", "models",  # changed option name, storing in 'models'
         multiple=True,
-        help="Models to include in consortium (can specify multiple, e.g., 'model:count' or '-m model1 -m model2')",
+        help="Model to include in consortium (use format 'model -n count')",
         required=True,
     )
     @click.option(
@@ -663,7 +713,7 @@ def register_commands(cli):
         "--count",
         type=int,
         default=1,
-        help="Number of instances to run for each model (used with separate -m flags)",
+        help="Default number of instances (if count not specified per model)",
     )
     @click.option(
         "--arbiter",
@@ -683,7 +733,7 @@ def register_commands(cli):
         default=3
     )
     @click.option(
-        "--minimum-iterations",
+        "--min-iterations",
         type=int,
         help="Minimum number of iterations to perform",
         default=1
@@ -693,7 +743,7 @@ def register_commands(cli):
         help="System prompt to use",
     )
     def save_command(name, models, count, arbiter, confidence_threshold, max_iterations,
-                    minimum_iterations, system):
+                     min_iterations, system):
         """Save a consortium configuration."""
         try:
             model_dict = parse_models(models, count)
@@ -705,7 +755,7 @@ def register_commands(cli):
             arbiter=arbiter,
             confidence_threshold=confidence_threshold,
             max_iterations=max_iterations,
-            minimum_iterations=minimum_iterations,
+            minimum_iterations=min_iterations,
             system_prompt=system,
         )
         _save_consortium_config(name, config)
@@ -744,7 +794,7 @@ def register_commands(cli):
                     click.echo(f"  System Prompt: {config.system_prompt}")
                 click.echo("")  # Empty line between consortiums
             except Exception as e:
-                click.echo(f"Error loading consortium '{row['name']}': {e}")
+                click.echo(f"Error loading consortium '{row['name']}']: {e}")
 
     @consortium.command(name="remove")
     @click.argument("name")

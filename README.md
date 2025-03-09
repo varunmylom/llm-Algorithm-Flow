@@ -4,20 +4,18 @@
 
 Based on Karpathy's observation:
 
-"I find that recently I end up using all of the models and all the time. One aspect is the curiosity of who gets what, but the other is that for a lot of problems they have this "NP Complete" nature to them, where coming up with a solution is significantly harder than verifying a candidate solution. So your best performance will come from just asking all the models, and then getting them to come to a consensus."
+> "I find that recently I end up using all of the models and all the time. One aspect is the curiosity of who gets what, but the other is that for a lot of problems they have this 'NP Complete' nature to them, where coming up with a solution is significantly harder than verifying a candidate solution. So your best performance will come from just asking all the models, and then getting them to come to a consensus."
 
-A plugin for the `llm` package that implements a model consortium system with iterative refinement and response synthesis. This plugin orchestrates multiple learned language models to collaboratively solve complex problems through structured dialogue, evaluation and arbitration.
+This plugin for the `llm` package implements a model consortium system with iterative refinement and response synthesis. It orchestrates multiple language models to collaboratively solve complex problems through structured dialogue, evaluation, and arbitration.
 
 ## Core Algorithm Flow
-
-The following Mermaid diagram illustrates the core algorithm flow of the LLM Karpathy Consortium:
 
 ```mermaid
 flowchart TD
     A[Start] --> B[Get Model Responses]
     B --> C[Synthesize Responses]
     C --> D{Check Confidence}
-    D -- Confidence >= Threshold --> E[Return Final Result]
+    D -- Confidence ≥ Threshold --> E[Return Final Result]
     D -- Confidence < Threshold --> F{Max Iterations Reached?}
     F -- No --> G[Prepare Next Iteration]
     G --> B
@@ -26,162 +24,117 @@ flowchart TD
 
 ## Features
 
-- **Multi-Model Orchestration**: Coordinate responses from multiple LLMs simultaneously
-- **Iterative Refinement**: Automatically refine responses through multiple rounds until confidence threshold is met
-- **Advanced Arbitration**: Uses a designated arbiter model to synthesize and evaluate responses
-- **Database Logging**: Built-in SQLite logging of all interactions and responses
-- **Configurable Parameters**: Adjustable confidence thresholds, iteration limits, and model selection
-- **Hundreds of Models**: Supports all models available via llm plugins
-- **Save and Load Consortium Configurations**: Save your favorite model configurations to reuse later.
+- **Multi-Model Orchestration**: Coordinate responses from multiple models in parallel.
+- **Iterative Refinement**: Automatically refine output until a confidence threshold is achieved.
+- **Advanced Arbitration**: Uses a designated arbiter model to synthesize and evaluate responses.
+- **Database Logging**: SQLite-backed logging of all interactions.
+- **Configurable Parameters**: Adjustable confidence thresholds, iteration limits, and model selection.
+- **Flexible Model Instance Counts**: Specify individual instance counts via the syntax `model:count`.  
+  *If no count is specified, a default instance count (default: 1) is used.*
 
-## New Features
+## New Model Instance Syntax
 
-- **Enhanced Model Selection**: Added support for the latest models including `claude-3-5-sonnet-20240620` and `deepseek-chat`.
-- **Improved Confidence Calculation**: Refined the confidence threshold algorithm for better accuracy.
-- **Extended Logging**: Added more detailed logging options for debugging and analysis.
-- **User Feedback Integration**: Implemented a feedback loop to incorporate user input into the refinement process.
-- **Performance Optimization**: Improved the speed and efficiency of the orchestration process.
+You can now define different numbers of instances per model by appending `:count` to the model name. For example:
+- `"o3-mini:1"` runs 1 instance of _o3-mini_.
+- `"gpt-4o:2"` runs 2 instances of _gpt-4o_.
+- `"gemini-2:3"` runs 3 instances of _gemini-2_.
 
 ## Installation
-First, get https://github.com/simonw/llm
 
-uv:
+First, get [llm](https://github.com/simonw/llm):
+
+Using `uv`:
 ```bash
 uv tool install llm
 ```
-pipx:
+Using `pipx`:
 ```bash
 pipx install llm
 ```
-
+Then install the consortium plugin:
 ```bash
 llm install llm-consortium
 ```
 
 ## Command Line Usage
 
-The `consortium` command now defaults to the `run` subcommand, allowing for more concise usage.
+The `consortium` command now defaults to the `run` subcommand for concise usage.
 
 Basic usage:
 ```bash
 llm consortium "What are the key considerations for AGI safety?"
 ```
 
-This will:
-
-1. Send the prompt to multiple models in parallel.
-2. Gather responses including reasoning and confidence.
-3. Use an arbiter model to synthesize the responses and identify key points of agreement/disagreement.
-4. The arbiter model evaluates confidence.
-5. If confidence is below the threshold and the maximum iterations have not been reached:
-   - Refinement areas are identified.
-   - A new iteration begins with an enhanced prompt.
-6. The process continues until the confidence threshold is met or the maximum iterations have been reached.
+This command will:
+1. Send your prompt to multiple models in parallel (using the specified instance counts, if provided).
+2. Gather responses along with analysis and confidence ratings.
+3. Use an arbiter model to synthesize these responses.
+4. Iterate to refine the answer until a specified confidence threshold or maximum iteration count is reached.
 
 ### Options
 
-- `-m, --models`: Models to include in consortium (can specify multiple). Defaults to `claude-3-opus-20240229`, `claude-3-sonnet-20240229`, `gpt-4`, and `gemini-pro`.
-- `--arbiter`: Model to use as arbiter (default: `claude-3-opus-20240229`).
-- `--confidence-threshold`: Minimum confidence threshold (default: `0.8`).
-- `--max-iterations`: Maximum number of iteration rounds (default: `3`).
+- `-m, --model`: Model to include in the consortium. To specify instance counts, use the format `model:count` (default models include: `claude-3-opus-20240229`, `claude-3-sonnet-20240229`, `gpt-4`, and `gemini-pro`).
+- `--arbiter`: The arbiter model (default: `claude-3-opus-20240229`).
+- `--confidence-threshold`: Minimum required confidence (default: `0.8`).
+- `--max-iterations`: Maximum rounds of iterations (default: `3`).
+- `--min-iterations`: Minimum iterations to perform (default: `1`).
 - `--system`: Custom system prompt.
-- `--output`: Save full results to a JSON file.
-- `--stdin`/`--no-stdin`: Read additional input from stdin and append to prompt (default: enabled).
-- `--raw`: Output raw response from arbiter model and individual model responses (default: enabled).
+- `--output`: Save detailed results to a JSON file.
+- `--stdin/--no-stdin`: Append additional input from stdin (default: enabled).
+- `--raw`: Output raw responses from both the arbiter and individual models (default: enabled).
 
-Advanced usage with options:
+Advanced example:
 ```bash
 llm consortium "Your complex query" \
-  --models claude-3-opus-20240229 \
-  --models claude-3-sonnet-20240229 \
-  --models gpt-4 \
-  --models gemini-pro \
-  --arbiter claude-3-opus-20240229 \
-  --confidence-threshold 0.8 \
-  --max-iterations 3 \
+  --model o3-mini:1 \
+  --model gpt-4o:2 \
+  --model gemini-2:3 \
+  --arbiter gemini-2 \
+  --confidence-threshold 1 \
+  --max-iterations 4 \
+  --min-iterations 3 \
   --output results.json
 ```
 
 ### Managing Consortium Configurations
-The `consortium` command also provides subcommands for managing configurations:
 
-#### Saving a Consortium as a model
+You can save a consortium configuration as a model for reuse. This allows you to quickly recall a set of model parameters in subsequent queries.
+
+#### Saving a Consortium as a Model
 ```bash
 llm consortium save my-consortium \
-    --models claude-3-opus-20240229 \
-    --models gpt-4 \
+    --model claude-3-opus-20240229 \
+    --model gpt-4 \
     --arbiter claude-3-opus-20240229 \
     --confidence-threshold 0.9 \
-    --max-iterations 5
+    --max-iterations 5 \
+    --min-iterations 1 \
+    --system "Your custom system prompt"
 ```
-This command saves the current configuration as a model with the name `my-consortium`.
 
+Once saved, you can invoke your custom consortium like this:
 ```bash
 llm -m my-consortium "What are the key considerations for AGI safety?"
 ```
 
-
-#### Listing Saved Configurations
-```bash
-llm consortium list
-```
-This command displays all available saved consortium configurations.
-
-#### Showing a Configuration
-```bash
-llm consortium show my-consortium
-```
-This command shows the details of a saved consortium named `my-consortium`.
-
-#### Removing a Configuration
-```bash
-llm consortium remove my-consortium
-```
-This command removes the saved consortium named `my-consortium`.
-
-### Response Structure
-
-The plugin uses a structured XML format for responses, including the synthesis, analysis, confidence and, if present, dissenting views.
-
-```xml
-<synthesis>
-[Synthesized response to the query]
-</synthesis>
-
-<confidence>
-[Confidence level from 0 to 1]
-</confidence>
-
-<analysis>
-[Analysis of the model responses, synthesis reasoning, and identification of key points of agreement or disagreement]
-</analysis>
-
-<dissent>
-[Notable dissenting views and refinement areas]
-</dissent>
-```
-
-### Database Logging
-
-All interactions are automatically logged to a SQLite database located in the LLM user directory.
-
 ## Programmatic Usage
 
-```python
-from llm_consortium import ConsortiumOrchestrator
+Use the `create_consortium` helper to configure an orchestrator in your Python code. For example:
 
-orchestrator = ConsortiumOrchestrator(
-    models=["o3-mini", "gpt-4o", "gemini-2"],
-    confidence_threshold=0.9,
-    max_iterations=3,
-    arbiter="gemini-2"
+```python
+from llm_consortium import create_consortium
+
+orchestrator = create_consortium(
+    models=["o3-mini:1", "gpt-4o:2", "gemini-2:3"],
+    confidence_threshold=1,
+    max_iterations=4,
+    min_iterations=3,
+    arbiter="gemini-2",
+    raw=True
 )
 
-result = await orchestrator.orchestrate("Your prompt")
-
+result = orchestrator.orchestrate("Your prompt here")
 print(f"Synthesized Response: {result['synthesis']['synthesis']}")
-print(f"Confidence: {result['synthesis']['confidence']}")
-print(f"Analysis: {result['synthesis']['analysis']}")
 ```
 
 ## License
@@ -190,4 +143,11 @@ MIT License
 
 ## Credits
 
-Developed as part of the LLM ecosystem, inspired by Andrej Karpathy's work on model collaboration and iteration.
+Developed as part of the LLM ecosystem and inspired by Andrej Karpathy’s insights on collaborative model consensus.
+
+## Changelog
+
+- **v0.3.1**:
+  - Introduced the `model:count` syntax for flexible model instance allocation.
+  - Improved confidence calculation and logging.
+  - Updated consortium configuration management.
