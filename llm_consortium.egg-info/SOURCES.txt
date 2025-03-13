@@ -10,5 +10,9 @@ llm_consortium.egg-info/dependency_links.txt
 llm_consortium.egg-info/entry_points.txt
 llm_consortium.egg-info/requires.txt
 llm_consortium.egg-info/top_level.txt
+tests/test_arbiter_parsing.py
 tests/test_cli.py
+tests/test_confidence_parsing.py
+tests/test_file_readers.py
 tests/test_llm_consortium.py
+tests/test_model_parsing.py

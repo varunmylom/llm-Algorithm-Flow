@@ -503,11 +503,12 @@ def read_stdin_if_not_tty() -> Optional[str]:
     return None
 
 class ConsortiumModel(llm.Model):
-    can_stream = False
+    can_stream = True
 
     class Options(llm.Options):
         confidence_threshold: Optional[float] = None
         max_iterations: Optional[int] = None
+        system_prompt: Optional[str] = None  # Add support for system prompt as an option
 
     def __init__(self, model_id: str, config: ConsortiumConfig):
         self.model_id = model_id
@@ -528,7 +529,18 @@ class ConsortiumModel(llm.Model):
     def execute(self, prompt, stream, response, conversation):
         """Execute the consortium synchronously"""
         try:
-            result = self.get_orchestrator().orchestrate(prompt.prompt)
+            # Check if a system prompt was provided via --system option
+            if hasattr(prompt, 'system') and prompt.system:
+                # Create a copy of the config with the updated system prompt
+                updated_config = ConsortiumConfig(**self.config.to_dict())
+                updated_config.system_prompt = prompt.system
+                # Create a new orchestrator with the updated config
+                orchestrator = ConsortiumOrchestrator(updated_config)
+                result = orchestrator.orchestrate(prompt.prompt)
+            else:
+                # Use the default orchestrator with the original config
+                result = self.get_orchestrator().orchestrate(prompt.prompt)
+                
             response.response_json = result
             return result["synthesis"]["synthesis"]
 
@@ -569,7 +581,6 @@ def _save_consortium_config(name: str, config: ConsortiumConfig) -> None:
     )
 
 from click_default_group import DefaultGroup
-
 class DefaultToRunGroup(DefaultGroup):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
