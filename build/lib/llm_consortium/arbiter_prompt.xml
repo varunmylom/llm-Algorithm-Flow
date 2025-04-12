@@ -1,4 +1,5 @@
 <arbiter_prompt>
+    <user_instructions>{user_instructions}</user_instructions>
     <original_prompt>{original_prompt}</original_prompt>
     <model_responses>
         {formatted_responses}
@@ -36,6 +37,7 @@ After your thought process, provide your synthesized output using the following 
     <synthesis>
         [Your synthesized response here. This should be a comprehensive summary that combines the best elements of the analyzed responses while addressing the original prompt effectively.]
         [IMPORTANT: This should resemble a normall llm chat response. The final synthesis should EXCLUDE all meta analysis and discussion of the model responses.]
+        [CRITICAL: If user instructions were provided in the user_instructions section, strictly adhere to those formatting and style guidelines in your synthesis.]
     </synthesis>
     
     <analysis>

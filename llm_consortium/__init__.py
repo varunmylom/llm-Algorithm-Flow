@@ -55,12 +55,7 @@ DEFAULT_SYSTEM_PROMPT = _read_system_prompt()
 
 def user_dir() -> pathlib.Path:
     """Get or create user directory for storing application data."""
-    llm_user_path = os.environ.get("LLM_USER_PATH")
-    if llm_user_path:
-        path = pathlib.Path(llm_user_path)
-    else:
-        path = pathlib.Path(click.get_app_dir("io.datasette.llm"))
-    path.mkdir(exist_ok=True, parents=True)
+    path = pathlib.Path(click.get_app_dir("io.datasette.llm"))
     return path
 
 def logs_db_path() -> pathlib.Path:
@@ -854,6 +849,7 @@ def register_commands(cli):
                 click.echo(f"  Arbiter: {config.arbiter}")
                 click.echo(f"  Confidence Threshold: {config.confidence_threshold}")
                 click.echo(f"  Max Iterations: {config.max_iterations}")
+                click.echo(f"  Min Iterations: {config.minimum_iterations}")
                 if config.system_prompt:
                     click.echo(f"  System Prompt: {config.system_prompt}")
                 click.echo("")  # Empty line between consortiums

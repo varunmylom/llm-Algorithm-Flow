@@ -55,12 +55,7 @@ DEFAULT_SYSTEM_PROMPT = _read_system_prompt()
 
 def user_dir() -> pathlib.Path:
     """Get or create user directory for storing application data."""
-    llm_user_path = os.environ.get("LLM_USER_PATH")
-    if llm_user_path:
-        path = pathlib.Path(llm_user_path)
-    else:
-        path = pathlib.Path(click.get_app_dir("io.datasette.llm"))
-    path.mkdir(exist_ok=True, parents=True)
+    path = pathlib.Path(click.get_app_dir("io.datasette.llm"))
     return path
 
 def logs_db_path() -> pathlib.Path:
@@ -163,12 +158,12 @@ class ConsortiumConfig(BaseModel):
 class ConsortiumOrchestrator:
     def __init__(self, config: ConsortiumConfig):
         self.models = config.models
-        # Retain system_prompt from config for backwards compatibility, but do not pass it separately.
+        # Store system_prompt from config
         self.system_prompt = config.system_prompt  
         self.confidence_threshold = config.confidence_threshold
         self.max_iterations = config.max_iterations
         self.minimum_iterations = config.minimum_iterations
-        self.arbiter = config.arbiter or "claude-3-opus-20240229"
+        self.arbiter = config.arbiter or "gemini-2.0-flash"
         self.iteration_history: List[IterationContext] = []
         # New: Dictionary to track conversation IDs for each model instance
         self.conversation_ids: Dict[str, str] = {}
@@ -289,7 +284,7 @@ class ConsortiumOrchestrator:
                     return {"model": model, "instance": instance + 1, "error": str(e)}
         return {"model": model, "instance": instance + 1, "error": "Rate limit exceeded after retries."}
 
-    def _parse_confidence_value(self, text: str, default: float = 0.5) -> float:
+    def _parse_confidence_value(self, text: str, default: float = 0.0) -> float:
         """Helper method to parse confidence values consistently."""
         # Try to find XML confidence tag, now handling multi-line and whitespace better
         xml_match = re.search(r"<confidence>\s*(0?\.\d+|1\.0|\d+)\s*</confidence>", text, re.IGNORECASE | re.DOTALL)
@@ -318,9 +313,61 @@ class ConsortiumOrchestrator:
 
     def _construct_iteration_prompt(self, original_prompt: str, last_synthesis: Dict[str, Any]) -> str:
         """Construct the prompt for the next iteration."""
-        # Simplified prompt that doesn't need to include the full history
-        # since the conversation context is maintained by the provider
-        return f"""Refining response for original prompt:
+        # Use the iteration prompt template from file instead of a hardcoded string
+        iteration_prompt_template = _read_iteration_prompt()
+        
+        # If template exists, use it with formatting, otherwise fall back to previous implementation
+        if iteration_prompt_template:
+            # Include the user_instructions parameter from the system_prompt
+            user_instructions = self.system_prompt or ""
+            
+            # Ensure all required keys exist in last_synthesis to prevent KeyError
+            formatted_synthesis = {
+                "synthesis": last_synthesis.get("synthesis", ""),
+                "confidence": last_synthesis.get("confidence", 0.0),
+                "analysis": last_synthesis.get("analysis", ""),
+                "dissent": last_synthesis.get("dissent", ""),
+                "needs_iteration": last_synthesis.get("needs_iteration", True),
+                "refinement_areas": last_synthesis.get("refinement_areas", [])
+            }
+            
+            # Check if the template requires refinement_areas
+            if "{refinement_areas}" in iteration_prompt_template:
+                try:
+                    return iteration_prompt_template.format(
+                        original_prompt=original_prompt,
+                        previous_synthesis=json.dumps(formatted_synthesis, indent=2),
+                        user_instructions=user_instructions,
+                        refinement_areas="\n".join(formatted_synthesis["refinement_areas"])
+                    )
+                except KeyError:
+                    # Fallback if format fails
+                    return f"""Refining response for original prompt:
+{original_prompt}
+
+Arbiter feedback from previous attempt:
+{json.dumps(formatted_synthesis, indent=2)}
+
+Please improve your response based on this feedback."""
+            else:
+                try:
+                    return iteration_prompt_template.format(
+                        original_prompt=original_prompt,
+                        previous_synthesis=json.dumps(formatted_synthesis, indent=2),
+                        user_instructions=user_instructions
+                    )
+                except KeyError:
+                    # Fallback if format fails
+                    return f"""Refining response for original prompt:
+{original_prompt}
+
+Arbiter feedback from previous attempt:
+{json.dumps(formatted_synthesis, indent=2)}
+
+Please improve your response based on this feedback."""
+        else:
+            # Fallback to previous hardcoded prompt
+            return f"""Refining response for original prompt:
 {original_prompt}
 
 Arbiter feedback from previous attempt:
@@ -370,19 +417,20 @@ Please improve your response based on this feedback."""
         formatted_history = self._format_iteration_history()
         formatted_responses = self._format_responses(responses)
 
+        # Extract user instructions from system_prompt if available
+        user_instructions = self.system_prompt or ""
+
         # Load and format the arbiter prompt template
         arbiter_prompt_template = _read_arbiter_prompt()
         arbiter_prompt = arbiter_prompt_template.format(
             original_prompt=original_prompt,
             formatted_responses=formatted_responses,
-            formatted_history=formatted_history
+            formatted_history=formatted_history,
+            user_instructions=user_instructions
         )
 
         arbiter_response = arbiter.prompt(arbiter_prompt)
         log_response(arbiter_response, arbiter)
-
-        # Print raw arbiter response
-        # click.echo(arbiter_response.text())
 
         try:
             return self._parse_arbiter_response(arbiter_response.text())
@@ -390,7 +438,7 @@ Please improve your response based on this feedback."""
             logger.error(f"Error parsing arbiter response: {e}")
             return {
                 "synthesis": arbiter_response.text(),
-                "confidence": 0.5,
+                "confidence": 0.0,
                 "analysis": "Parsing failed - see raw response",
                 "dissent": "",
                 "needs_iteration": False,
@@ -417,7 +465,7 @@ Please improve your response based on this feedback."""
                         value = float(match.group(1).strip())
                         result[key] = value / 100 if value > 1 else value
                     except (ValueError, TypeError):
-                        result[key] = 0.5
+                        result[key] = 0.0
                 elif key == "needs_iteration":
                     result[key] = match.group(1).lower() == "true"
                 elif key == "refinement_areas":
@@ -450,11 +498,12 @@ def read_stdin_if_not_tty() -> Optional[str]:
     return None
 
 class ConsortiumModel(llm.Model):
-    can_stream = False
+    can_stream = True
 
     class Options(llm.Options):
         confidence_threshold: Optional[float] = None
         max_iterations: Optional[int] = None
+        system_prompt: Optional[str] = None  # Add support for system prompt as an option
 
     def __init__(self, model_id: str, config: ConsortiumConfig):
         self.model_id = model_id
@@ -475,7 +524,18 @@ class ConsortiumModel(llm.Model):
     def execute(self, prompt, stream, response, conversation):
         """Execute the consortium synchronously"""
         try:
-            result = self.get_orchestrator().orchestrate(prompt.prompt)
+            # Check if a system prompt was provided via --system option
+            if hasattr(prompt, 'system') and prompt.system:
+                # Create a copy of the config with the updated system prompt
+                updated_config = ConsortiumConfig(**self.config.to_dict())
+                updated_config.system_prompt = prompt.system
+                # Create a new orchestrator with the updated config
+                orchestrator = ConsortiumOrchestrator(updated_config)
+                result = orchestrator.orchestrate(prompt.prompt)
+            else:
+                # Use the default orchestrator with the original config
+                result = self.get_orchestrator().orchestrate(prompt.prompt)
+                
             response.response_json = result
             return result["synthesis"]["synthesis"]
 
@@ -516,7 +576,6 @@ def _save_consortium_config(name: str, config: ConsortiumConfig) -> None:
     )
 
 from click_default_group import DefaultGroup
-
 class DefaultToRunGroup(DefaultGroup):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -565,7 +624,6 @@ def create_consortium(
         max_iterations=max_iterations,
         minimum_iterations=min_iterations,
         arbiter=arbiter,
-        raw=raw,
     )
     return ConsortiumOrchestrator(config=config)
 
@@ -674,7 +732,8 @@ def register_commands(cli):
                arbiter=arbiter,
             )
         )
-
+        # debug: print system prompt
+        # click.echo(f"System prompt: {system}") # This is printed when we use consortium run, but not when we use a saved consortium model
         try:
             result = orchestrator.orchestrate(prompt)
 
@@ -790,6 +849,7 @@ def register_commands(cli):
                 click.echo(f"  Arbiter: {config.arbiter}")
                 click.echo(f"  Confidence Threshold: {config.confidence_threshold}")
                 click.echo(f"  Max Iterations: {config.max_iterations}")
+                click.echo(f"  Min Iterations: {config.minimum_iterations}")
                 if config.system_prompt:
                     click.echo(f"  System Prompt: {config.system_prompt}")
                 click.echo("")  # Empty line between consortiums
