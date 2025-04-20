@@ -249,7 +249,7 @@ class ConsortiumOrchestrator:
                 
                 # Check if we have an existing conversation for this model instance
                 conversation_id = self.conversation_ids.get(instance_key)
-                
+                click.echo(f"Conversation ID for {instance_key}: {conversation_id}")
                 # If we have a conversation_id, continue that conversation
                 if conversation_id:
                     response = llm.get_model(model).prompt(
@@ -262,6 +262,7 @@ class ConsortiumOrchestrator:
                     # Store the conversation_id for future iterations
                     if hasattr(response, 'conversation_id') and response.conversation_id:
                         self.conversation_ids[instance_key] = response.conversation_id
+                        click.echo(f"New conversation ID for {instance_key}: {response.conversation_id}")
                 
                 text = response.text()
                 log_response(response, f"{model}-{instance + 1}")
@@ -523,6 +524,7 @@ class ConsortiumModel(llm.Model):
 
     def execute(self, prompt, stream, response, conversation):
         """Execute the consortium synchronously"""
+        click.echo(f"conversation_id: {conversation}")
         try:
             # Check if a system prompt was provided via --system option
             if hasattr(prompt, 'system') and prompt.system:
