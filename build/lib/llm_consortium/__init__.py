@@ -1,6 +1,7 @@
 import click
 import json
 import llm
+from llm.cli import load_conversation  # Import from llm.cli instead of llm
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import logging
@@ -166,17 +167,28 @@ class ConsortiumOrchestrator:
         self.arbiter = config.arbiter or "gemini-2.0-flash"
         self.iteration_history: List[IterationContext] = []
         # New: Dictionary to track conversation IDs for each model instance
-        self.conversation_ids: Dict[str, str] = {}
+        # self.conversation_ids: Dict[str, str] = {}
 
-    def orchestrate(self, prompt: str) -> Dict[str, Any]:
+    def orchestrate(self, prompt: str, conversation_history: str = "") -> Dict[str, Any]:
         iteration_count = 0
         final_result = None
         original_prompt = prompt
-        # Incorporate system instructions into the user prompt if available.
+
+        # Construct the prompt including history, system prompt, and original user prompt
+        full_prompt_parts = []
+        if conversation_history:
+            # Append history if provided
+            full_prompt_parts.append(conversation_history.strip())
+
+        # Add system prompt if it exists
         if self.system_prompt:
-            combined_prompt = f"[SYSTEM INSTRUCTIONS]\n{self.system_prompt}\n[/SYSTEM INSTRUCTIONS]\n\n{original_prompt}"
-        else:
-            combined_prompt = original_prompt
+            system_wrapper = f"[SYSTEM INSTRUCTIONS]\n{self.system_prompt}\n[/SYSTEM INSTRUCTIONS]"
+            full_prompt_parts.append(system_wrapper)
+
+        # Add the latest user prompt for this turn
+        full_prompt_parts.append(f"Human: {original_prompt}")
+
+        combined_prompt = "\n\n".join(full_prompt_parts)
 
         current_prompt = f"""<prompt>
     <instruction>{combined_prompt}</instruction>
@@ -191,6 +203,11 @@ class ConsortiumOrchestrator:
 
             # Have arbiter synthesize and evaluate responses
             synthesis = self._synthesize_responses(original_prompt, model_responses)
+
+            # Ensure synthesis has the required keys to avoid KeyError
+            if "confidence" not in synthesis:
+                synthesis["confidence"] = 0.0
+                logger.warning("Missing 'confidence' in synthesis, using default value 0.0")
 
             # Store iteration context
             self.iteration_history.append(IterationContext(synthesis, model_responses))
@@ -247,22 +264,7 @@ class ConsortiumOrchestrator:
     <instruction>{prompt}</instruction>
 </prompt>"""
                 
-                # Check if we have an existing conversation for this model instance
-                conversation_id = self.conversation_ids.get(instance_key)
-                click.echo(f"Conversation ID for {instance_key}: {conversation_id}")
-                # If we have a conversation_id, continue that conversation
-                if conversation_id:
-                    response = llm.get_model(model).prompt(
-                        xml_prompt,
-                        conversation_id=conversation_id
-                    )
-                else:
-                    # Start a new conversation
-                    response = llm.get_model(model).prompt(xml_prompt)
-                    # Store the conversation_id for future iterations
-                    if hasattr(response, 'conversation_id') and response.conversation_id:
-                        self.conversation_ids[instance_key] = response.conversation_id
-                        click.echo(f"New conversation ID for {instance_key}: {response.conversation_id}")
+                response = llm.get_model(model).prompt(xml_prompt)
                 
                 text = response.text()
                 log_response(response, f"{model}-{instance + 1}")
@@ -271,7 +273,6 @@ class ConsortiumOrchestrator:
                     "instance": instance + 1,
                     "response": text,
                     "confidence": self._extract_confidence(text),
-                    "conversation_id": getattr(response, 'conversation_id', None)
                 }
             except Exception as e:
                 # Check if the error is a rate-limit error
@@ -288,7 +289,7 @@ class ConsortiumOrchestrator:
     def _parse_confidence_value(self, text: str, default: float = 0.0) -> float:
         """Helper method to parse confidence values consistently."""
         # Try to find XML confidence tag, now handling multi-line and whitespace better
-        xml_match = re.search(r"<confidence>\s*(0?\.\d+|1\.0|\d+)\s*</confidence>", text, re.IGNORECASE | re.DOTALL)
+        xml_match = re.search(r"<confidence>s*(0?.d+|1.0|d+)s*</confidence>", text, re.IGNORECASE | re.DOTALL)
         if xml_match:
             try:
                 value = float(xml_match.group(1).strip())
@@ -300,7 +301,7 @@ class ConsortiumOrchestrator:
         for line in text.lower().split("\n"):
             if "confidence:" in line or "confidence level:" in line:
                 try:
-                    nums = re.findall(r"(\d*\.?\d+)%?", line)
+                    nums = re.findall(r"(d*.?d+)%?", line)
                     if nums:
                         num = float(nums[0])
                         return num / 100 if num > 1 else num
@@ -392,7 +393,7 @@ Please improve your response based on this feedback."""
             <synthesis>{iteration.synthesis['synthesis']}</synthesis>
             <confidence>{iteration.synthesis['confidence']}</confidence>
             <refinement_areas>
-                {self._format_refinement_areas(iteration.synthesis['refinement_areas'])}
+                {self._format_refinement_areas(iteration.synthesis.get('refinement_areas', []))}
             </refinement_areas>
         </iteration>""")
         return "\n".join(history) if history else "<no_previous_iterations>No previous iterations available.</no_previous_iterations>"
@@ -449,15 +450,24 @@ Please improve your response based on this feedback."""
     def _parse_arbiter_response(self, text: str, is_final_iteration: bool = False) -> Dict[str, Any]:
         """Parse arbiter response with special handling for final iteration."""
         sections = {
-            "synthesis": r"<synthesis>([\s\S]*?)</synthesis>",
-            "confidence": r"<confidence>\s*([\d.]+)\s*</confidence>",
-            "analysis": r"<analysis>([\s\S]*?)</analysis>",
-            "dissent": r"<dissent>([\s\S]*?)</dissent>",
+            "synthesis": r"<synthesis>([sS]*?)</synthesis>",
+            "confidence": r"<confidence>s*([d.]+)s*</confidence>",
+            "analysis": r"<analysis>([sS]*?)</analysis>",
+            "dissent": r"<dissent>([sS]*?)</dissent>",
             "needs_iteration": r"<needs_iteration>(true|false)</needs_iteration>",
-            "refinement_areas": r"<refinement_areas>([\s\S]*?)</refinement_areas>"
+            "refinement_areas": r"<refinement_areas>([sS]*?)</refinement_areas>"
         }
 
-        result = {}
+        # Initialize with default values to avoid KeyError
+        result = {
+            "synthesis": text,  # Use the full text as fallback synthesis
+            "confidence": 0.0,   # Default confidence
+            "analysis": "",
+            "dissent": "",
+            "needs_iteration": False,
+            "refinement_areas": []
+        }
+
         for key, pattern in sections.items():
             match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if match:
@@ -466,7 +476,8 @@ Please improve your response based on this feedback."""
                         value = float(match.group(1).strip())
                         result[key] = value / 100 if value > 1 else value
                     except (ValueError, TypeError):
-                        result[key] = 0.0
+                        # Keep default value
+                        pass
                 elif key == "needs_iteration":
                     result[key] = match.group(1).lower() == "true"
                 elif key == "refinement_areas":
@@ -524,8 +535,36 @@ class ConsortiumModel(llm.Model):
 
     def execute(self, prompt, stream, response, conversation):
         """Execute the consortium synchronously"""
-        click.echo(f"conversation_id: {conversation}")
         try:
+            # Extract conversation history from the conversation object directly
+            conversation_history = ""
+            if conversation and hasattr(conversation, 'responses') and conversation.responses:
+                logger.info(f"Processing conversation with {len(conversation.responses)} previous exchanges")
+                history_parts = []
+                for resp in conversation.responses:
+                    # Handle prompt format
+                    human_prompt = "[prompt unavailable]"
+                    if hasattr(resp, 'prompt') and resp.prompt:
+                        if hasattr(resp.prompt, 'prompt'):
+                            human_prompt = resp.prompt.prompt
+                        else:
+                            human_prompt = str(resp.prompt)
+                            
+                    # Handle response text format
+                    assistant_response = "[response unavailable]"
+                    if hasattr(resp, 'text') and callable(resp.text):
+                        assistant_response = resp.text()
+                    elif hasattr(resp, 'response') and resp.response:
+                        assistant_response = resp.response
+                        
+                    # Format the history exchange
+                    history_parts.append(f"Human: {human_prompt}")
+                    history_parts.append(f"Assistant: {assistant_response}")
+                
+                if history_parts:
+                    conversation_history = "\n".join(history_parts)
+                    logger.info(f"Successfully formatted {len(history_parts)//2} exchanges from conversation history")
+            
             # Check if a system prompt was provided via --system option
             if hasattr(prompt, 'system') and prompt.system:
                 # Create a copy of the config with the updated system prompt
@@ -533,15 +572,16 @@ class ConsortiumModel(llm.Model):
                 updated_config.system_prompt = prompt.system
                 # Create a new orchestrator with the updated config
                 orchestrator = ConsortiumOrchestrator(updated_config)
-                result = orchestrator.orchestrate(prompt.prompt)
+                result = orchestrator.orchestrate(prompt.prompt, conversation_history=conversation_history)
             else:
                 # Use the default orchestrator with the original config
-                result = self.get_orchestrator().orchestrate(prompt.prompt)
+                result = self.get_orchestrator().orchestrate(prompt.prompt, conversation_history=conversation_history)
                 
             response.response_json = result
             return result["synthesis"]["synthesis"]
 
         except Exception as e:
+            logger.exception(f"Consortium execution failed: {e}")
             raise llm.ModelError(f"Consortium execution failed: {e}")
 
 def _get_consortium_configs() -> Dict[str, ConsortiumConfig]:
