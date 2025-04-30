@@ -184,17 +184,13 @@ class ConsortiumOrchestrator:
 
         # Add system prompt if it exists
         if self.system_prompt:
-            system_wrapper = f"[SYSTEM INSTRUCTIONS]
-{self.system_prompt}
-[/SYSTEM INSTRUCTIONS]"
+            system_wrapper = f"[SYSTEM INSTRUCTIONS]\n{self.system_prompt}\n[/SYSTEM INSTRUCTIONS]"
             full_prompt_parts.append(system_wrapper)
 
         # Add the latest user prompt for this turn
         full_prompt_parts.append(f"Human: {original_prompt}")
 
-        combined_prompt = "
-
-".join(full_prompt_parts)
+        combined_prompt = "\n\n".join(full_prompt_parts)
 
         current_prompt = f"""<prompt>
     <instruction>{combined_prompt}</instruction>
@@ -330,8 +326,7 @@ class ConsortiumOrchestrator:
                 pass
 
         # Fallback to plain text parsing
-        for line in text.lower().split("
-"):
+        for line in text.lower().split("\n"):
             if "confidence:" in line or "confidence level:" in line:
                 try:
                     nums = re.findall(r"(\d*\.?\d+)%?", line)
@@ -373,8 +368,7 @@ class ConsortiumOrchestrator:
                         original_prompt=original_prompt,
                         previous_synthesis=json.dumps(formatted_synthesis, indent=2),
                         user_instructions=user_instructions,
-                        refinement_areas="
-".join(formatted_synthesis["refinement_areas"])
+                        refinement_areas="\n".join(formatted_synthesis["refinement_areas"])
                     )
                 except KeyError:
                     # Fallback if format fails
@@ -414,8 +408,7 @@ Please improve your response based on this feedback."""
     def _format_iteration_history(self) -> str:
         history = []
         for i, iteration in enumerate(self.iteration_history, start=1):
-            model_responses = "
-".join(
+            model_responses = "\n".join(
                 f"<model_response>{r['model']}: {r.get('response', 'Error')}</model_response>"
                 for r in iteration.model_responses
             )
@@ -431,12 +424,10 @@ Please improve your response based on this feedback."""
                 {self._format_refinement_areas(iteration.synthesis.get('refinement_areas', []))}
             </refinement_areas>
         </iteration>""")
-        return "
-".join(history) if history else "<no_previous_iterations>No previous iterations available.</no_previous_iterations>"
+        return "\n".join(history) if history else "<no_previous_iterations>No previous iterations available.</no_previous_iterations>"
 
     def _format_refinement_areas(self, areas: List[str]) -> str:
-        return "
-                ".join(f"<area>{area}</area>" for area in areas)
+        return "\n                ".join(f"<area>{area}</area>" for area in areas)
 
     def _format_responses(self, responses: List[Dict[str, Any]]) -> str:
         formatted = []
@@ -447,8 +438,7 @@ Please improve your response based on this feedback."""
             <confidence>{r.get('confidence', 'N/A')}</confidence>
             <response>{r.get('response', 'Error: ' + r.get('error', 'Unknown error'))}</response>
         </model_response>""")
-        return "
-".join(formatted)
+        return "\n".join(formatted)
 
     def _synthesize_responses(self, original_prompt: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
         logger.debug("Synthesizing responses")
@@ -618,9 +608,7 @@ class ConsortiumModel(llm.Model):
                     history_parts.append(f"Assistant: {assistant_response}")
 
                 if history_parts:
-                    conversation_history = "
-
-".join(history_parts)
+                    conversation_history = "\n\n".join(history_parts)
                     logger.info(f"Successfully formatted {len(history_parts)//2} exchanges from conversation history")
 
             # Check if a system prompt was provided via --system option
@@ -1049,8 +1037,7 @@ def register_commands(cli):
             click.echo("No saved consortiums found.")
             return
 
-        click.echo("Available saved consortiums:
-")
+        click.echo("Available saved consortiums:\n")
         for name, config in configs.items():
             click.echo(f"Name: {name}")
             click.echo(f"  Models: {', '.join(f'{k}:{v}' for k, v in config.models.items())}")

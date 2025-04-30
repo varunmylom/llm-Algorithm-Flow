@@ -1,3 +1,4 @@
+
 import click
 import json
 import llm
@@ -160,7 +161,7 @@ class ConsortiumOrchestrator:
     def __init__(self, config: ConsortiumConfig):
         self.models = config.models
         # Store system_prompt from config
-        self.system_prompt = config.system_prompt  
+        self.system_prompt = config.system_prompt
         self.confidence_threshold = config.confidence_threshold
         self.max_iterations = config.max_iterations
         self.minimum_iterations = config.minimum_iterations
@@ -173,6 +174,7 @@ class ConsortiumOrchestrator:
         iteration_count = 0
         final_result = None
         original_prompt = prompt
+        raw_arbiter_response_final = "" # Store the final raw response
 
         # Construct the prompt including history, system prompt, and original user prompt
         full_prompt_parts = []
@@ -202,30 +204,56 @@ class ConsortiumOrchestrator:
             model_responses = self._get_model_responses(current_prompt)
 
             # Have arbiter synthesize and evaluate responses
-            synthesis = self._synthesize_responses(original_prompt, model_responses)
+            synthesis_result = self._synthesize_responses(original_prompt, model_responses)
+            # Store the raw response text from this iteration
+            raw_arbiter_response_final = synthesis_result.get("raw_arbiter_response", "")
 
-            # Ensure synthesis has the required keys to avoid KeyError
-            if "confidence" not in synthesis:
-                synthesis["confidence"] = 0.0
-                logger.warning("Missing 'confidence' in synthesis, using default value 0.0")
 
-            # Store iteration context
-            self.iteration_history.append(IterationContext(synthesis, model_responses))
+            # Defensively check if synthesis_result is not None before proceeding
+            if synthesis_result is not None:
+                 # Ensure synthesis has the required keys to avoid KeyError
+                if "confidence" not in synthesis_result:
+                    synthesis_result["confidence"] = 0.0
+                    logger.warning("Missing 'confidence' in synthesis, using default value 0.0")
 
-            if synthesis["confidence"] >= self.confidence_threshold and iteration_count >= self.minimum_iterations:
-                final_result = synthesis
+                # Store iteration context
+                self.iteration_history.append(IterationContext(synthesis_result, model_responses))
+
+                if synthesis_result["confidence"] >= self.confidence_threshold and iteration_count >= self.minimum_iterations:
+                    final_result = synthesis_result
+                    break
+
+                # Prepare for next iteration if needed
+                current_prompt = self._construct_iteration_prompt(original_prompt, synthesis_result)
+            else:
+                # Handle the unexpected case where synthesis_result is None
+                logger.error("Synthesis result was None, breaking iteration.")
+                # Use the last valid synthesis if available, otherwise create a fallback
+                if self.iteration_history:
+                    final_result = self.iteration_history[-1].synthesis
+                else:
+                    final_result = {
+                        "synthesis": "Error: Failed to get synthesis.", "confidence": 0.0,
+                         "analysis": "Consortium failed.", "dissent": "", "needs_iteration": False,
+                         "refinement_areas": [], "raw_arbiter_response": raw_arbiter_response_final
+                    }
                 break
 
-            # Prepare for next iteration if needed
-            current_prompt = self._construct_iteration_prompt(original_prompt, synthesis)
 
         if final_result is None:
-            final_result = synthesis
+             # If loop finished without meeting threshold, use the last synthesis_result
+            final_result = synthesis_result if synthesis_result is not None else {
+                 "synthesis": "Error: No final synthesis.", "confidence": 0.0,
+                 "analysis":"Consortium finished iterations.", "dissent": "", "needs_iteration": False,
+                 "refinement_areas": [], "raw_arbiter_response": raw_arbiter_response_final
+            }
+
 
         return {
             "original_prompt": original_prompt,
-            "model_responses": model_responses,
-            "synthesis": final_result,
+            # Storing all model responses might be verbose, consider adjusting if needed
+            "model_responses_final_iteration": model_responses,
+            "synthesis": final_result, # This now includes raw_arbiter_response
             "metadata": {
                 "models_used": self.models,
                 "arbiter": self.arbiter,
@@ -243,29 +271,29 @@ class ConsortiumOrchestrator:
                     futures.append(
                         executor.submit(self._get_model_response, model, prompt, instance)
                     )
-            
+
             # Gather all results as they complete
             for future in concurrent.futures.as_completed(futures):
                 responses.append(future.result())
-                
+
         return responses
 
     def _get_model_response(self, model: str, prompt: str, instance: int) -> Dict[str, Any]:
         logger.debug(f"Getting response from model: {model} instance {instance + 1}")
         attempts = 0
         max_retries = 3
-        
+
         # Generate a unique key for this model instance
         instance_key = f"{model}-{instance}"
-        
+
         while attempts < max_retries:
             try:
                 xml_prompt = f"""<prompt>
     <instruction>{prompt}</instruction>
 </prompt>"""
-                
+
                 response = llm.get_model(model).prompt(xml_prompt)
-                
+
                 text = response.text()
                 log_response(response, f"{model}-{instance + 1}")
                 return {
@@ -289,7 +317,7 @@ class ConsortiumOrchestrator:
     def _parse_confidence_value(self, text: str, default: float = 0.0) -> float:
         """Helper method to parse confidence values consistently."""
         # Try to find XML confidence tag, now handling multi-line and whitespace better
-        xml_match = re.search(r"<confidence>s*(0?.d+|1.0|d+)s*</confidence>", text, re.IGNORECASE | re.DOTALL)
+        xml_match = re.search(r"<confidence>\s*(0?\.\d+|1\.0|\d+)\s*</confidence>", text, re.IGNORECASE | re.DOTALL)
         if xml_match:
             try:
                 value = float(xml_match.group(1).strip())
@@ -301,7 +329,7 @@ class ConsortiumOrchestrator:
         for line in text.lower().split("\n"):
             if "confidence:" in line or "confidence level:" in line:
                 try:
-                    nums = re.findall(r"(d*.?d+)%?", line)
+                    nums = re.findall(r"(\d*\.?\d+)%?", line)
                     if nums:
                         num = float(nums[0])
                         return num / 100 if num > 1 else num
@@ -317,12 +345,12 @@ class ConsortiumOrchestrator:
         """Construct the prompt for the next iteration."""
         # Use the iteration prompt template from file instead of a hardcoded string
         iteration_prompt_template = _read_iteration_prompt()
-        
+
         # If template exists, use it with formatting, otherwise fall back to previous implementation
         if iteration_prompt_template:
             # Include the user_instructions parameter from the system_prompt
             user_instructions = self.system_prompt or ""
-            
+
             # Ensure all required keys exist in last_synthesis to prevent KeyError
             formatted_synthesis = {
                 "synthesis": last_synthesis.get("synthesis", ""),
@@ -332,7 +360,7 @@ class ConsortiumOrchestrator:
                 "needs_iteration": last_synthesis.get("needs_iteration", True),
                 "refinement_areas": last_synthesis.get("refinement_areas", [])
             }
-            
+
             # Check if the template requires refinement_areas
             if "{refinement_areas}" in iteration_prompt_template:
                 try:
@@ -390,8 +418,8 @@ Please improve your response based on this feedback."""
             <model_responses>
                 {model_responses}
             </model_responses>
-            <synthesis>{iteration.synthesis['synthesis']}</synthesis>
-            <confidence>{iteration.synthesis['confidence']}</confidence>
+            <synthesis>{iteration.synthesis.get('synthesis','Error')}</synthesis>
+            <confidence>{iteration.synthesis.get('confidence',0.0)}</confidence>
             <refinement_areas>
                 {self._format_refinement_areas(iteration.synthesis.get('refinement_areas', []))}
             </refinement_areas>
@@ -432,30 +460,36 @@ Please improve your response based on this feedback."""
         )
 
         arbiter_response = arbiter.prompt(arbiter_prompt)
-        log_response(arbiter_response, arbiter)
+        raw_arbiter_text = arbiter_response.text() # Store raw text
+        log_response(arbiter_response, self.arbiter) # Use self.arbiter
 
         try:
-            return self._parse_arbiter_response(arbiter_response.text())
+            parsed_result = self._parse_arbiter_response(raw_arbiter_text)
+            # Add raw response to the parsed result
+            parsed_result['raw_arbiter_response'] = raw_arbiter_text
+            return parsed_result
         except Exception as e:
             logger.error(f"Error parsing arbiter response: {e}")
+            # Return fallback dict INCLUDING raw response
             return {
-                "synthesis": arbiter_response.text(),
+                "synthesis": raw_arbiter_text, # Fallback synthesis is raw text
                 "confidence": 0.0,
                 "analysis": "Parsing failed - see raw response",
                 "dissent": "",
                 "needs_iteration": False,
-                "refinement_areas": []
+                "refinement_areas": [],
+                "raw_arbiter_response": raw_arbiter_text # Ensure raw is included here
             }
 
     def _parse_arbiter_response(self, text: str, is_final_iteration: bool = False) -> Dict[str, Any]:
         """Parse arbiter response with special handling for final iteration."""
         sections = {
-            "synthesis": r"<synthesis>([sS]*?)</synthesis>",
-            "confidence": r"<confidence>s*([d.]+)s*</confidence>",
-            "analysis": r"<analysis>([sS]*?)</analysis>",
-            "dissent": r"<dissent>([sS]*?)</dissent>",
+            "synthesis": r"<synthesis>([\s\S]*?)</synthesis>",
+            "confidence": r"<confidence>\s*([\d.]+)\s*</confidence>",
+            "analysis": r"<analysis>([\s\S]*?)</analysis>",
+            "dissent": r"<dissent>([\s\S]*?)</dissent>",
             "needs_iteration": r"<needs_iteration>(true|false)</needs_iteration>",
-            "refinement_areas": r"<refinement_areas>([sS]*?)</refinement_areas>"
+            "refinement_areas": r"<refinement_areas>([\s\S]*?)</refinement_areas>"
         }
 
         # Initialize with default values to avoid KeyError
@@ -466,41 +500,53 @@ Please improve your response based on this feedback."""
             "dissent": "",
             "needs_iteration": False,
             "refinement_areas": []
+            # raw_arbiter_response is added in _synthesize_responses
         }
 
         for key, pattern in sections.items():
             match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if match:
+                extracted_text = match.group(1).strip()
                 if key == "confidence":
                     try:
-                        value = float(match.group(1).strip())
+                        value = float(extracted_text)
                         result[key] = value / 100 if value > 1 else value
                     except (ValueError, TypeError):
-                        # Keep default value
-                        pass
+                        # Keep default value if conversion fails
+                        logger.warning(f"Could not parse confidence value: {extracted_text}")
                 elif key == "needs_iteration":
-                    result[key] = match.group(1).lower() == "true"
+                    result[key] = extracted_text.lower() == "true"
                 elif key == "refinement_areas":
-                    result[key] = [area.strip() for area in match.group(1).split("\n") if area.strip()]
+                    # Parse refinement areas, splitting by newline and filtering empty
+                    result[key] = [area.strip() for area in re.split(r'\s*<area>\s*|\s*</area>\s*', extracted_text) if area.strip()]
+
                 else:
-                    result[key] = match.group(1).strip()
+                    result[key] = extracted_text # Store the clean extracted text
 
-        # For final iteration, extract clean text response
-        if is_final_iteration:
-            clean_text = result.get("synthesis", "")
-            # Remove any remaining XML tags
-            clean_text = re.sub(r"<[^>]+>", "", clean_text).strip()
-            result["clean_text"] = clean_text
+        # No special handling for is_final_iteration needed here anymore,
+        # the synthesis field should contain the clean text if parsed correctly.
 
+        # *** FIX: Explicitly return the result dictionary ***
         return result
+
 
 def parse_models(models: List[str], count: int) -> Dict[str, int]:
     """Parse models and counts from CLI arguments into a dictionary."""
     model_dict = {}
-    
+
     for item in models:
-        model_dict[item] = count
-    
+        # Basic split, can be enhanced later if needed
+        if ':' in item:
+             parts = item.split(':', 1)
+             model_name = parts[0]
+             try:
+                 model_count = int(parts[1])
+             except ValueError:
+                 raise ValueError(f"Invalid count for model {model_name}: {parts[1]}")
+             model_dict[model_name] = model_count
+        else:
+             model_dict[item] = count # Use default count if not specified
+
     return model_dict
 
 def read_stdin_if_not_tty() -> Optional[str]:
@@ -510,7 +556,7 @@ def read_stdin_if_not_tty() -> Optional[str]:
     return None
 
 class ConsortiumModel(llm.Model):
-    can_stream = True
+    can_stream = False # Synchronous execution only for now
 
     class Options(llm.Options):
         confidence_threshold: Optional[float] = None
@@ -549,22 +595,22 @@ class ConsortiumModel(llm.Model):
                             human_prompt = resp.prompt.prompt
                         else:
                             human_prompt = str(resp.prompt)
-                            
+
                     # Handle response text format
                     assistant_response = "[response unavailable]"
                     if hasattr(resp, 'text') and callable(resp.text):
                         assistant_response = resp.text()
                     elif hasattr(resp, 'response') and resp.response:
                         assistant_response = resp.response
-                        
+
                     # Format the history exchange
                     history_parts.append(f"Human: {human_prompt}")
                     history_parts.append(f"Assistant: {assistant_response}")
-                
+
                 if history_parts:
-                    conversation_history = "\n".join(history_parts)
+                    conversation_history = "\n\n".join(history_parts)
                     logger.info(f"Successfully formatted {len(history_parts)//2} exchanges from conversation history")
-            
+
             # Check if a system prompt was provided via --system option
             if hasattr(prompt, 'system') and prompt.system:
                 # Create a copy of the config with the updated system prompt
@@ -576,9 +622,14 @@ class ConsortiumModel(llm.Model):
             else:
                 # Use the default orchestrator with the original config
                 result = self.get_orchestrator().orchestrate(prompt.prompt, conversation_history=conversation_history)
-                
+
+            # Store the full result JSON in the response object for logging
             response.response_json = result
-            return result["synthesis"]["synthesis"]
+
+            # *** FIX: Return the clean synthesis text ***
+            # Safely access the nested 'synthesis' text from the result dictionary
+            clean_synthesis_text = result.get("synthesis", {}).get("synthesis", "Error: Synthesis unavailable")
+            return clean_synthesis_text
 
         except Exception as e:
             logger.exception(f"Consortium execution failed: {e}")
@@ -599,8 +650,11 @@ def _get_consortium_configs() -> Dict[str, ConsortiumConfig]:
     configs = {}
     for row in db["consortium_configs"].rows:
         config_name = row["name"]
-        config_data = json.loads(row["config"])
-        configs[config_name] = ConsortiumConfig.from_dict(config_data)
+        try:
+            config_data = json.loads(row["config"])
+            configs[config_name] = ConsortiumConfig.from_dict(config_data)
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+             logger.error(f"Error loading config for '{config_name}': {e}. Skipping.")
     return configs
 
 def _save_consortium_config(name: str, config: ConsortiumConfig) -> None:
@@ -631,15 +685,32 @@ class DefaultToRunGroup(DefaultGroup):
         if rv is not None:
             return rv
         # If command not found, check if it's an option for the default command
-        if cmd_name.startswith('-'):
-            return super().get_command(ctx, self.default_cmd_name)
+        # Also handle cases where the command might be misinterpreted as an option
+        if cmd_name is None or cmd_name.startswith('-'):
+            # Check if 'run' is a valid command in the current context
+             run_cmd = super().get_command(ctx, self.default_cmd_name)
+             if run_cmd:
+                 return run_cmd
         return None
 
     def resolve_command(self, ctx, args):
-        # Handle the case where no command is provided
-        if not args:
-            args = [self.default_cmd_name]
+        # If no command name detected, assume default command 'run'
+        try:
+            # Peek at the first arg without consuming it
+            first_arg = args[0] if args else None
+            # If the first arg isn't a known command and doesn't look like an option,
+            # or if there are no args, prepend the default command name.
+            if first_arg is None or (not first_arg.startswith('-') and super().get_command(ctx, first_arg) is None):
+                 # Check if 'run' is actually registered before prepending
+                 if super().get_command(ctx, self.default_cmd_name) is not None:
+                     args.insert(0, self.default_cmd_name)
+        except IndexError:
+             # No arguments, definitely use default
+             if super().get_command(ctx, self.default_cmd_name) is not None:
+                 args = [self.default_cmd_name]
+
         return super().resolve_command(ctx, args)
+
 
 def create_consortium(
     models: list[str],
@@ -656,9 +727,7 @@ def create_consortium(
     - models: list of model names. To specify instance counts, use the format "model:count".
     - system_prompt: if not provided, DEFAULT_SYSTEM_PROMPT is used.
     """
-    model_dict = {}
-    for m in models:
-        model_dict[m] = default_count
+    model_dict = parse_models(models, default_count) # Use parse_models here
     config = ConsortiumConfig(
         models=model_dict,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
@@ -683,15 +752,15 @@ def register_commands(cli):
         "-m",
         "--model", "models",  # store values in 'models'
         multiple=True,
-        help="Model to include in consortium (use format 'model -n count'; can specify multiple)",
-        default=["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4", "gemini-pro"],
+        help="Model to include, use format 'model:count' or 'model' for default count. Multiple allowed.",
+        default=[], # Default to empty list, require at least one model
     )
     @click.option(
         "-n",
         "--count",
         type=int,
         default=1,
-        help="Number of instances (if count not specified per model)",
+        help="Default number of instances (if count not specified per model)",
     )
     @click.option(
         "--arbiter",
@@ -701,7 +770,7 @@ def register_commands(cli):
     @click.option(
         "--confidence-threshold",
         type=float,
-        help="Minimum confidence threshold",
+        help="Minimum confidence threshold (0.0-1.0)",
         default=0.8
     )
     @click.option(
@@ -718,95 +787,141 @@ def register_commands(cli):
     )
     @click.option(
         "--system",
-        help="System prompt to use",
+        help="System prompt text or path to system prompt file.",
     )
     @click.option(
         "--output",
-        type=click.Path(dir_okay=False, writable=True),
-        help="Save full results to this JSON file",
+        type=click.Path(dir_okay=False, writable=True, path_type=pathlib.Path), # Use pathlib
+        help="Save full results (JSON) to this file path.",
     )
     @click.option(
-        "--stdin/--no-stdin",
-        default=True,
-        help="Read additional input from stdin and append to prompt",
+        "--stdin/--no-stdin", "read_from_stdin", # More descriptive name
+        default=True, # Default changed to True
+        help="Read prompt text from stdin if no prompt argument is given.",
     )
     @click.option(
         "--raw",
         is_flag=True,
         default=False,
-        help="Output raw response from arbiter model",
+        help="Output the raw, unparsed response from the final arbiter call instead of the clean synthesis.",
     )
     def run_command(prompt, models, count, arbiter, confidence_threshold, max_iterations,
-                   min_iterations, system, output, stdin, raw):
-        """Run prompt through a consortium of models and synthesize results."""
+                   min_iterations, system, output, read_from_stdin, raw):
+        """Run prompt through a dynamically defined consortium of models."""
+        # Check if models list is empty
+        if not models:
+            # Provide default models if none are specified
+            models = ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4", "gemini-pro"]
+            logger.info(f"No models specified, using default set: {', '.join(models)}")
+
+
+        # Handle prompt input (argument vs stdin)
+        if not prompt and read_from_stdin:
+            prompt_from_stdin = read_stdin_if_not_tty()
+            if prompt_from_stdin:
+                prompt = prompt_from_stdin
+            else:
+                 # If stdin is not a tty but empty, or no prompt arg given & stdin disabled
+                 if not sys.stdin.isatty():
+                     logger.warning("Reading from stdin enabled, but stdin was empty.")
+                 # Raise error only if no prompt was given via arg and stdin reading failed/disabled
+                 if not prompt: # Check again if prompt was somehow set
+                    raise click.UsageError("No prompt provided via argument or stdin.")
+        elif not prompt and not read_from_stdin:
+             raise click.UsageError("No prompt provided via argument and stdin reading is disabled.")
+
+
         # Parse models and counts
         try:
             model_dict = parse_models(models, count)
         except ValueError as e:
             raise click.ClickException(str(e))
 
-        # If no prompt is provided, read from stdin
-        if not prompt and stdin:
-            prompt = read_stdin_if_not_tty()
-            if not prompt:
-                raise click.UsageError("No prompt provided and no input from stdin")
+        # Handle system prompt (text or file path)
+        system_prompt_content = None
+        if system:
+             system_path = pathlib.Path(system)
+             if system_path.is_file():
+                 try:
+                     system_prompt_content = system_path.read_text().strip()
+                     logger.info(f"Loaded system prompt from file: {system}")
+                 except Exception as e:
+                     raise click.ClickException(f"Error reading system prompt file '{system}': {e}")
+             else:
+                 system_prompt_content = system # Use as literal string
+                 logger.info("Using provided system prompt text.")
+        else:
+            system_prompt_content = DEFAULT_SYSTEM_PROMPT # Use default if nothing provided
+            logger.info("Using default system prompt.")
 
-        # Convert percentage to decimal if needed
+
+        # Convert percentage confidence to decimal if needed
         if confidence_threshold > 1.0:
-            confidence_threshold /= 100.0
+             if confidence_threshold <= 100.0:
+                 confidence_threshold /= 100.0
+             else:
+                 raise click.UsageError("Confidence threshold must be between 0.0 and 1.0 (or 0 and 100).")
+        elif confidence_threshold < 0.0:
+             raise click.UsageError("Confidence threshold must be non-negative.")
 
-        if stdin:
-            stdin_content = read_stdin_if_not_tty()
-            if stdin_content:
-                prompt = f"{prompt}\n\n{stdin_content}"
-
-        logger.info(f"Starting consortium with {len(model_dict)} models")
+        logger.info(f"Starting consortium run with {len(model_dict)} models.")
         logger.debug(f"Models: {', '.join(f'{k}:{v}' for k, v in model_dict.items())}")
         logger.debug(f"Arbiter model: {arbiter}")
+        logger.debug(f"Confidence: {confidence_threshold}, Max Iter: {max_iterations}, Min Iter: {min_iterations}")
 
         orchestrator = ConsortiumOrchestrator(
             config=ConsortiumConfig(
                models=model_dict,
-               system_prompt=system,
+               system_prompt=system_prompt_content,
                confidence_threshold=confidence_threshold,
                max_iterations=max_iterations,
                minimum_iterations=min_iterations,
                arbiter=arbiter,
             )
         )
-        # debug: print system prompt
-        # click.echo(f"System prompt: {system}") # This is printed when we use consortium run, but not when we use a saved consortium model
+
         try:
             result = orchestrator.orchestrate(prompt)
 
+            # Output full result to JSON file if requested
             if output:
-                with open(output, 'w') as f:
-                    json.dump(result, f, indent=2)
-                logger.info(f"Results saved to {output}")
+                try:
+                    with output.open('w') as f:
+                        json.dump(result, f, indent=2)
+                    logger.info(f"Full results saved to {output}")
+                except Exception as e:
+                    click.ClickException(f"Error saving results to '{output}': {e}")
 
-            click.echo(result["synthesis"]["analysis"])
-            click.echo(result["synthesis"]["dissent"])
-            click.echo(result["synthesis"]["synthesis"])
+
+            # *** FIX: Conditional output based on --raw flag ***
+            final_synthesis_data = result.get("synthesis", {})
 
             if raw:
-                click.echo("\nIndividual model responses:")
-                for response in result["model_responses"]:
-                    click.echo(f"\nModel: {response['model']} (Instance {response.get('instance', 1)})")
-                    click.echo(f"Confidence: {response.get('confidence', 'N/A')}")
-                    click.echo(f"Response: {response.get('response', 'Error: ' + response.get('error', 'Unknown error'))}")
+                 # Output the raw arbiter response text
+                 raw_text = final_synthesis_data.get("raw_arbiter_response", "Error: Raw arbiter response unavailable")
+                 click.echo(raw_text)
+            else:
+                 # Output the clean synthesis text
+                 clean_text = final_synthesis_data.get("synthesis", "Error: Clean synthesis unavailable")
+                 click.echo(clean_text)
+
+            # Optional: Log other parts like analysis/dissent if needed for debugging, but don't echo by default
+            # logger.debug(f"Analysis: {final_synthesis_data.get('analysis', '')}")
+            # logger.debug(f"Dissent: {final_synthesis_data.get('dissent', '')}")
 
         except Exception as e:
-            logger.exception("Error in consortium command")
-            raise click.ClickException(str(e))
+            logger.exception("Error during consortium run execution")
+            raise click.ClickException(f"Consortium run failed: {e}")
+
 
     # Register consortium management commands group
     @consortium.command(name="save")
     @click.argument("name")
     @click.option(
         "-m",
-        "--model", "models",  # changed option name, storing in 'models'
+        "--model", "models",
         multiple=True,
-        help="Model to include in consortium (use format 'model -n count')",
+        help="Model to include (format 'model:count' or 'model'). Multiple allowed.",
         required=True,
     )
     @click.option(
@@ -824,7 +939,7 @@ def register_commands(cli):
     @click.option(
         "--confidence-threshold",
         type=float,
-        help="Minimum confidence threshold",
+        help="Minimum confidence threshold (0.0-1.0)",
         default=0.8
     )
     @click.option(
@@ -841,15 +956,38 @@ def register_commands(cli):
     )
     @click.option(
         "--system",
-        help="System prompt to use",
+        help="System prompt text or path to system prompt file.",
     )
     def save_command(name, models, count, arbiter, confidence_threshold, max_iterations,
                      min_iterations, system):
-        """Save a consortium configuration."""
+        """Save a consortium configuration to be used as a model."""
         try:
             model_dict = parse_models(models, count)
         except ValueError as e:
             raise click.ClickException(str(e))
+
+        # Handle system prompt (text or file path) - similar to run_command
+        system_prompt_content = None
+        if system:
+             system_path = pathlib.Path(system)
+             if system_path.is_file():
+                 try:
+                     system_prompt_content = system_path.read_text().strip()
+                 except Exception as e:
+                     raise click.ClickException(f"Error reading system prompt file '{system}': {e}")
+             else:
+                 system_prompt_content = system
+        # No default system prompt when saving? Or use DEFAULT_SYSTEM_PROMPT? Let's assume None if not provided.
+
+        # Validate confidence threshold
+        if confidence_threshold > 1.0:
+             if confidence_threshold <= 100.0:
+                 confidence_threshold /= 100.0
+             else:
+                 raise click.UsageError("Confidence threshold must be between 0.0 and 1.0 (or 0 and 100).")
+        elif confidence_threshold < 0.0:
+             raise click.UsageError("Confidence threshold must be non-negative.")
+
 
         config = ConsortiumConfig(
             models=model_dict,
@@ -857,52 +995,49 @@ def register_commands(cli):
             confidence_threshold=confidence_threshold,
             max_iterations=max_iterations,
             minimum_iterations=min_iterations,
-            system_prompt=system,
+            system_prompt=system_prompt_content, # Store resolved content
         )
-        _save_consortium_config(name, config)
-        click.echo(f"Consortium configuration '{name}' saved.")
+        try:
+            _save_consortium_config(name, config)
+            click.echo(f"Consortium configuration '{name}' saved.")
+            click.echo(f"You can now use it like: llm -m {name} \"Your prompt here\"")
+        except Exception as e:
+             raise click.ClickException(f"Error saving consortium '{name}': {e}")
+
 
     @consortium.command(name="list")
     def list_command():
-        """List all saved consortiums with their details."""
-        db = DatabaseConnection.get_connection()
+        """List all saved consortium configurations."""
+        try:
+            configs = _get_consortium_configs()
+        except Exception as e:
+             raise click.ClickException(f"Error reading consortium configurations: {e}")
 
-        db.execute("""
-        CREATE TABLE IF NOT EXISTS consortium_configs (
-            name TEXT PRIMARY KEY,
-            config TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-
-        consortiums = list(db["consortium_configs"].rows)
-        if not consortiums:
-            click.echo("No consortiums found.")
+        if not configs:
+            click.echo("No saved consortiums found.")
             return
 
-        click.echo("Available consortiums:\n")
-        for row in consortiums:
-            try:
-                config_data = json.loads(row['config'])
-                config = ConsortiumConfig.from_dict(config_data)
+        click.echo("Available saved consortiums:\n")
+        for name, config in configs.items():
+            click.echo(f"Name: {name}")
+            click.echo(f"  Models: {', '.join(f'{k}:{v}' for k, v in config.models.items())}")
+            click.echo(f"  Arbiter: {config.arbiter}")
+            click.echo(f"  Confidence Threshold: {config.confidence_threshold}")
+            click.echo(f"  Max Iterations: {config.max_iterations}")
+            click.echo(f"  Min Iterations: {config.minimum_iterations}")
+            system_prompt_display = config.system_prompt
+            if system_prompt_display and len(system_prompt_display) > 60:
+                 system_prompt_display = system_prompt_display[:57] + "..."
+            click.echo(f"  System Prompt: {system_prompt_display or 'Default'}")
+            click.echo("") # Empty line between consortiums
 
-                click.echo(f"Consortium: {row['name']}")
-                click.echo(f"  Models: {', '.join(f'{k}:{v}' for k, v in config.models.items())}")
-                click.echo(f"  Arbiter: {config.arbiter}")
-                click.echo(f"  Confidence Threshold: {config.confidence_threshold}")
-                click.echo(f"  Max Iterations: {config.max_iterations}")
-                click.echo(f"  Min Iterations: {config.minimum_iterations}")
-                if config.system_prompt:
-                    click.echo(f"  System Prompt: {config.system_prompt}")
-                click.echo("")  # Empty line between consortiums
-            except Exception as e:
-                click.echo(f"Error loading consortium '{row['name']}']: {e}")
 
     @consortium.command(name="remove")
     @click.argument("name")
     def remove_command(name):
-        """Remove a saved consortium."""
+        """Remove a saved consortium configuration."""
         db = DatabaseConnection.get_connection()
+        # Ensure table exists before trying to delete
         db.execute("""
         CREATE TABLE IF NOT EXISTS consortium_configs (
             name TEXT PRIMARY KEY,
@@ -911,32 +1046,56 @@ def register_commands(cli):
         )
         """)
         try:
+            # Check if it exists before deleting
+            count = db["consortium_configs"].count_where("name = ?", [name])
+            if count == 0:
+                 raise click.ClickException(f"Consortium with name '{name}' not found.")
             db["consortium_configs"].delete(name)
-            click.echo(f"Consortium '{name}' removed.")
-        except sqlite_utils.db.NotFoundError:
-            raise click.ClickException(f"Consortium with name '{name}' not found.")
+            click.echo(f"Consortium configuration '{name}' removed.")
+        except Exception as e:
+             # Catch potential database errors beyond NotFoundError
+             raise click.ClickException(f"Error removing consortium '{name}': {e}")
+
 
 @llm.hookimpl
 def register_models(register):
-    logger.debug("KarpathyConsortiumPlugin.register_commands called")
+    logger.debug("Registering saved consortium models")
     try:
-        for name, config in _get_consortium_configs().items():
+        configs = _get_consortium_configs()
+        for name, config in configs.items():
             try:
-                model = ConsortiumModel(name, config)
-                register(model, aliases=(name,))
+                # Ensure config is valid before registering
+                if not config.models or not config.arbiter:
+                     logger.warning(f"Skipping registration of invalid consortium '{name}': Missing models or arbiter.")
+                     continue
+                model_instance = ConsortiumModel(name, config)
+                register(model_instance, aliases=[name]) # Use list for aliases
+                logger.debug(f"Registered consortium model: {name}")
             except Exception as e:
-                logger.error(f"Failed to register consortium '{name}': {e}")
+                logger.error(f"Failed to register consortium model '{name}': {e}")
     except Exception as e:
-        logger.error(f"Failed to load consortium configurations: {e}")
+        logger.error(f"Failed to load or register consortium configurations: {e}")
 
+
+# Keep this class definition for potential future hook implementations
 class KarpathyConsortiumPlugin:
     @staticmethod
     @llm.hookimpl
     def register_commands(cli):
-        logger.debug("KarpathyConsortiumPlugin.register_commands called")
+        # This hook is technically handled by the register_commands function above,
+        # but keeping the class structure might be useful.
+        logger.debug("KarpathyConsortiumPlugin.register_commands hook called (via function)")
+        pass # Function above does the work
 
-logger.debug("llm_karpathy_consortium module finished loading")
 
-__all__ = ['KarpathyConsortiumPlugin', 'log_response', 'DatabaseConnection', 'logs_db_path', 'user_dir', 'ConsortiumModel']
+logger.debug("llm_consortium module finished loading")
 
-__version__ = "0.3.1"
+# Define __all__ for explicit exports if this were a larger package
+__all__ = [
+    'KarpathyConsortiumPlugin', 'ConsortiumModel', 'ConsortiumConfig',
+    'ConsortiumOrchestrator', 'create_consortium', 'register_commands',
+    'register_models', 'log_response', 'DatabaseConnection', 'logs_db_path',
+    'user_dir'
+]
+
+__version__ = "0.3.2" # Incremented version number
