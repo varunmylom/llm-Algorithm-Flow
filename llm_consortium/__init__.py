@@ -282,44 +282,44 @@ class ConsortiumOrchestrator:
         return responses
 
     def _get_model_response(self, model: str, prompt: str, instance: int, consortium_id: Optional[str] = None) -> Dict[str, Any]:
-    if model == 'test-model':
-        response = llm.Response.fake()
-        response._set_content('test response')
-    else:
-        logger.debug(f"Getting response from model: {model} instance {instance + 1}")
-        attempts = 0
-        max_retries = 3
+        if model == 'test-model':
+            response = llm.Response.fake()
+            response._set_content('test response')
+        else:
+            logger.debug(f"Getting response from model: {model} instance {instance + 1}")
+            attempts = 0
+            max_retries = 3
 
-        # Generate a unique key for this model instance
-        instance_key = f"{model}-{instance}"
+            # Generate a unique key for this model instance
+            instance_key = f"{model}-{instance}"
 
-        while attempts < max_retries:
-            try:
-                xml_prompt = f"""<prompt>
-    <instruction>{prompt}</instruction>
-</prompt>"""
+            while attempts < max_retries:
+                try:
+                    xml_prompt = f"""<prompt>
+        <instruction>{prompt}</instruction>
+    </prompt>"""
 
-                response = llm.get_model(model).prompt(xml_prompt)
+                    response = llm.get_model(model).prompt(xml_prompt)
 
-                text = response.text()
-                log_response(response, f"{model}-{instance + 1}")
-                return {
-                    "model": model,
-                    "instance": instance + 1,
-                    "response": text,
-                    "confidence": self._extract_confidence(text),
-                }
-            except Exception as e:
-                # Check if the error is a rate-limit error
-                if "RateLimitError" in str(e):
-                    attempts += 1
-                    wait_time = 2 ** attempts  # exponential backoff
-                    logger.warning(f"Rate limit encountered for {model}, retrying in {wait_time} seconds... (attempt {attempts})")
-                    time.sleep(wait_time)
-                else:
-                    logger.exception(f"Error getting response from {model} instance {instance + 1}")
-                    return {"model": model, "instance": instance + 1, "error": str(e)}
-        return {"model": model, "instance": instance + 1, "error": "Rate limit exceeded after retries."}
+                    text = response.text()
+                    log_response(response, f"{model}-{instance + 1}")
+                    return {
+                        "model": model,
+                        "instance": instance + 1,
+                        "response": text,
+                        "confidence": self._extract_confidence(text),
+                    }
+                except Exception as e:
+                    # Check if the error is a rate-limit error
+                    if "RateLimitError" in str(e):
+                        attempts += 1
+                        wait_time = 2 ** attempts  # exponential backoff
+                        logger.warning(f"Rate limit encountered for {model}, retrying in {wait_time} seconds... (attempt {attempts})")
+                        time.sleep(wait_time)
+                    else:
+                        logger.exception(f"Error getting response from {model} instance {instance + 1}")
+                        return {"model": model, "instance": instance + 1, "error": str(e)}
+            return {"model": model, "instance": instance + 1, "error": "Rate limit exceeded after retries."}
 
     def _parse_confidence_value(self, text: str, default: float = 0.0) -> float:
         """Helper method to parse confidence values consistently."""
