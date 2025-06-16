@@ -229,6 +229,9 @@ class ConsortiumOrchestrator:
 
             # Get responses from all models using the current prompt
             model_responses = self._get_model_responses(current_prompt)
+            # Add a unique ID to each response for the arbiter to reference
+            for i, r in enumerate(model_responses, 1):
+                r['id'] = i
 
             # Have arbiter synthesize and evaluate responses
             synthesis_result = self._synthesize_responses(original_prompt, model_responses)
@@ -459,11 +462,11 @@ Please improve your response based on this feedback."""
 
     def _format_refinement_areas(self, areas: List[str]) -> str:
         return "\n                ".join(f"<area>{area}</area>" for area in areas)
-
     def _format_responses(self, responses: List[Dict[str, Any]]) -> str:
         formatted = []
         for r in responses:
             formatted.append(f"""<model_response>
+            <id>{r["id"]}</id>
             <model>{r['model']}</model>
             <instance>{r.get('instance', 1)}</instance>
             <confidence>{r.get('confidence', 'N/A')}</confidence>
