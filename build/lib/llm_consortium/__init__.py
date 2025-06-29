@@ -16,14 +16,6 @@ import concurrent.futures  # Add concurrent.futures for parallel processing
 import threading  # Add threading for thread-local storage
 import secrets
 
-# Todo:
-# "finish_reason": "length"
-# "finish_reason": "max_tokens"
-# "stop_reason": "max_tokens",
-# "finishReason": "MAX_TOKENS"
-# "finishReason": "length"
-# response.response_json
-# Todo: setup continuation models: claude, deepseek etc.
 
 # Read system prompt from file
 def _read_system_prompt() -> str:
@@ -1181,6 +1173,15 @@ def register_commands(cli):
 @llm.hookimpl
 def register_models(register):
     logger.debug("Registering saved consortium models")
+    
+    # Register the dummy model for testing
+    try:
+        dummy_model = DummyModel()
+        register(dummy_model, aliases=["dummy"])
+        logger.debug("Registered dummy model for testing")
+    except Exception as e:
+        logger.error(f"Failed to register dummy model: {e}")
+    
     try:
         configs = _get_consortium_configs()
         for name, config in configs.items():
@@ -1220,3 +1221,36 @@ __all__ = [
 ]
 
 __version__ = "0.3.2" # Incremented version number
+
+class DummyModel(llm.Model):
+    model_id = "dummy"
+    can_stream = True
+    
+    def execute(self, prompt, stream, response, conversation):
+        # Simple dummy model that echoes back the prompt with a prefix
+        message = f"DUMMY ECHO: {prompt.prompt}"
+        if stream:
+            yield message
+        else:
+            return message
+
+# Test the dummy model
+if __name__ == "__main__":
+    import tempfile
+    import os
+    
+    # Create a temporary directory for the test
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["LLM_USER_PATH"] = tmpdir
+        
+        # Register the dummy model
+        from llm.plugins import pm
+        
+        class DummyPlugin:
+            __name__ = "DummyPlugin"
+            
+            @llm.hookimpl
+            def register_models(self, register):
+                register(DummyModel())
+        
+        pm.register(DummyPlugin(), name="dummy-plugin")
