@@ -1,3 +1,4 @@
 .agent
+build/
 *.egg-info/
 __pycache__/
