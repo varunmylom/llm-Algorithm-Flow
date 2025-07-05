@@ -34,5 +34,7 @@ packages = ["llm_consortium"]
 llm_consortium = [
     "system_prompt.txt",
     "arbiter_prompt.xml",
-    "iteration_prompt.txt"
+    "iteration_prompt.txt",
+    "rank_prompt.xml",
+    "pick_one_prompt.xml"
 ]

@@ -1,4 +1,3 @@
-
 import click
 import json
 import llm
@@ -52,6 +51,25 @@ def _read_iteration_prompt() -> str:
             return f.read().strip()
     except Exception as e:
         logger.error(f"Error reading iteration prompt file: {e}")
+        return ""
+
+
+def _read_pick_one_prompt() -> str:
+    try:
+        file_path = pathlib.Path(__file__).parent / "pick_one_prompt.xml"
+        with open(file_path, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading pick_one_prompt.xml file: {e}")
+        return ""
+
+def _read_rank_prompt() -> str:
+    try:
+        file_path = pathlib.Path(__file__).parent / "rank_prompt.xml"
+        with open(file_path, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading rank_prompt.xml file: {e}")
         return ""
 
 DEFAULT_SYSTEM_PROMPT = _read_system_prompt()
@@ -150,6 +168,7 @@ class ConsortiumConfig(BaseModel):
     max_iterations: int = 3
     minimum_iterations: int = 1
     arbiter: Optional[str] = None
+    judging_method: str = "default"
 
     def to_dict(self):
         return self.model_dump()
@@ -167,6 +186,7 @@ class ConsortiumOrchestrator:
         self.max_iterations = config.max_iterations
         self.minimum_iterations = config.minimum_iterations
         self.arbiter = config.arbiter or "gemini-2.0-flash"
+        self.judging_method = config.judging_method
         self.iteration_history: List[IterationContext] = []
         self.consortium_id: Optional[str] = None
         # New: Dictionary to track conversation IDs for each model instance
@@ -199,12 +219,19 @@ class ConsortiumOrchestrator:
     <instruction>{combined_prompt}</instruction>
 </prompt>"""
 
+        # For non-iterative methods, run only once
+        if hasattr(self, "judging_method") and self.judging_method != "default":
+            self.max_iterations = 1
+
         while iteration_count < self.max_iterations or iteration_count < self.minimum_iterations:
             iteration_count += 1
             logger.debug(f"Starting iteration {iteration_count}")
 
             # Get responses from all models using the current prompt
             model_responses = self._get_model_responses(current_prompt)
+            # Add a unique ID to each response for the arbiter to reference
+            for i, r in enumerate(model_responses, 1):
+                r['id'] = i
 
             # Have arbiter synthesize and evaluate responses
             synthesis_result = self._synthesize_responses(original_prompt, model_responses)
@@ -435,11 +462,11 @@ Please improve your response based on this feedback."""
 
     def _format_refinement_areas(self, areas: List[str]) -> str:
         return "\n                ".join(f"<area>{area}</area>" for area in areas)
-
     def _format_responses(self, responses: List[Dict[str, Any]]) -> str:
         formatted = []
         for r in responses:
             formatted.append(f"""<model_response>
+            <id>{r["id"]}</id>
             <model>{r['model']}</model>
             <instance>{r.get('instance', 1)}</instance>
             <confidence>{r.get('confidence', 'N/A')}</confidence>
@@ -457,8 +484,15 @@ Please improve your response based on this feedback."""
         # Extract user instructions from system_prompt if available
         user_instructions = self.system_prompt or ""
 
-        # Load and format the arbiter prompt template
-        arbiter_prompt_template = _read_arbiter_prompt()
+        # Choose prompt template based on judging method
+        if hasattr(self, 'judging_method') and self.judging_method == 'pick-one':
+            arbiter_prompt_template = _read_pick_one_prompt()
+        elif hasattr(self, 'judging_method') and self.judging_method == 'rank':
+            arbiter_prompt_template = _read_rank_prompt()
+        else:
+            # Default to arbiter prompt
+            arbiter_prompt_template = _read_arbiter_prompt()
+
         arbiter_prompt = arbiter_prompt_template.format(
             original_prompt=original_prompt,
             formatted_responses=formatted_responses,
@@ -467,11 +501,18 @@ Please improve your response based on this feedback."""
         )
 
         arbiter_response = arbiter.prompt(arbiter_prompt)
-        raw_arbiter_text = arbiter_response.text() # Store raw text
-        log_response(arbiter_response, self.arbiter) # Use self.arbiter
+        raw_arbiter_text = arbiter_response.text()
+        log_response(arbiter_response, self.arbiter)
 
         try:
-            parsed_result = self._parse_arbiter_response(raw_arbiter_text)
+            # Choose parser based on judging method
+            if hasattr(self, 'judging_method') and self.judging_method == 'pick-one':
+                parsed_result = self._parse_pick_one_response(raw_arbiter_text, responses)
+            elif hasattr(self, 'judging_method') and self.judging_method == 'rank':
+                parsed_result = self._parse_rank_response(raw_arbiter_text, responses)
+            else:
+                parsed_result = self._parse_arbiter_response(raw_arbiter_text)
+            
             # Add raw response to the parsed result
             parsed_result['raw_arbiter_response'] = raw_arbiter_text
             return parsed_result
@@ -488,6 +529,7 @@ Please improve your response based on this feedback."""
                 "raw_arbiter_response": raw_arbiter_text # Ensure raw is included here
             }
 
+    
     def _parse_arbiter_response(self, text: str, is_final_iteration: bool = False) -> Dict[str, Any]:
         """Parse arbiter response with special handling for final iteration."""
         sections = {
@@ -535,6 +577,40 @@ Please improve your response based on this feedback."""
 
         # *** FIX: Explicitly return the result dictionary ***
         return result
+
+    def _parse_pick_one_response(self, text: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Parse arbiter response for pick-one method."""
+        match = re.search(r"<response_id>\s*(\d+)\s*</response_id>", text, re.IGNORECASE)
+        if not match:
+            raise ValueError("Could not find a valid <response_id> tag.")
+        chosen_id = int(match.group(1))
+        chosen_response = next((r for r in responses if r.get('id') == chosen_id), None)
+        if not chosen_response:
+            raise ValueError(f"Arbiter chose response ID {chosen_id}, but this ID was not found.")
+        return {
+            "synthesis": chosen_response['response'], "confidence": 1.0,
+            "analysis": f"Arbiter selected response #{chosen_id} from model '{chosen_response['model']}'.",
+            "dissent": "", "needs_iteration": False, "refinement_areas": [], "chosen_id": chosen_id
+        }
+
+    def _parse_rank_response(self, text: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Parse arbiter response for rank method."""
+        ranking_match = re.search(r"<ranking>([\s\S]*?)</ranking>", text, re.IGNORECASE | re.DOTALL)
+        if not ranking_match:
+            raise ValueError("Could not find a <ranking> tag.")
+        ranked_ids_str = re.findall(r'<rank position="\d+">(\d+)</rank>', ranking_match.group(1), re.IGNORECASE)
+        if not ranked_ids_str:
+            raise ValueError("Found <ranking> tag, but no valid <rank> tags inside.")
+        ranked_ids = [int(id_str) for id_str in ranked_ids_str]
+        top_id = ranked_ids[0]
+        top_response = next((r for r in responses if r.get('id') == top_id), None)
+        if not top_response:
+            raise ValueError(f"Top-ranked response ID {top_id} not found.")
+        return {
+            "synthesis": top_response['response'], "confidence": 1.0,
+            "analysis": f"Arbiter ranked all responses. Top choice is #{top_id} from '{top_response['model']}'. Full ranking: {ranked_ids}",
+            "dissent": "", "needs_iteration": False, "refinement_areas": [], "ranking": ranked_ids
+        }
 
 
 def parse_models(models: List[str], count: int) -> Dict[str, int]:
@@ -746,6 +822,7 @@ def create_consortium(
     max_iterations: int = 3,
     min_iterations: int = 1,
     arbiter: Optional[str] = None,
+    judging_method: str = "default",
     system_prompt: Optional[str] = None,
     default_count: int = 1,
     raw: bool = False,
@@ -763,7 +840,8 @@ def create_consortium(
         max_iterations=max_iterations,
         minimum_iterations=min_iterations,
         arbiter=arbiter,
-    )
+               judging_method=judging_method,
+            )
     return ConsortiumOrchestrator(config=config)
 
 @llm.hookimpl
@@ -833,8 +911,14 @@ def register_commands(cli):
         default=False,
         help="Output the raw, unparsed response from the final arbiter call instead of the clean synthesis.",
     )
+    @click.option(
+        "--judging-method",
+        type=click.Choice(["default", "pick-one", "rank"], case_sensitive=False),
+        default="default",
+        help="Judging method for the arbiter (default, pick-one, rank)."
+    )
     def run_command(prompt, models, count, arbiter, confidence_threshold, max_iterations,
-                   min_iterations, system, output, read_from_stdin, raw):
+                   min_iterations, system, output, read_from_stdin, raw, judging_method):
         """Run prompt through a dynamically defined consortium of models."""
         # Check if models list is empty
         if not models:
@@ -904,7 +988,8 @@ def register_commands(cli):
                confidence_threshold=confidence_threshold,
                max_iterations=max_iterations,
                minimum_iterations=min_iterations,
-               arbiter=arbiter,
+                arbiter=arbiter,
+               judging_method=judging_method,
             )
         )
 
@@ -986,8 +1071,14 @@ def register_commands(cli):
         "--system",
         help="System prompt text or path to system prompt file.",
     )
+    @click.option(
+        "--judging-method",
+        type=click.Choice(["default", "pick-one", "rank"], case_sensitive=False),
+        default="default",
+        help="Judging method for the arbiter (default, pick-one, rank)."
+    )
     def save_command(name, models, count, arbiter, confidence_threshold, max_iterations,
-                     min_iterations, system):
+                     min_iterations, system, judging_method):
         """Save a consortium configuration to be used as a model."""
         try:
             model_dict = parse_models(models, count)
@@ -1023,7 +1114,8 @@ def register_commands(cli):
             confidence_threshold=confidence_threshold,
             max_iterations=max_iterations,
             minimum_iterations=min_iterations,
-            system_prompt=system_prompt_content, # Store resolved content
+            system_prompt=system_prompt_content,
+            judging_method=judging_method,
         )
         try:
             _save_consortium_config(name, config)
@@ -1057,6 +1149,7 @@ def register_commands(cli):
             if system_prompt_display and len(system_prompt_display) > 60:
                  system_prompt_display = system_prompt_display[:57] + "..."
             click.echo(f"  System Prompt: {system_prompt_display or 'Default'}")
+            click.echo(f"  Judging Method: {config.judging_method}")
             click.echo("") # Empty line between consortiums
 
 
