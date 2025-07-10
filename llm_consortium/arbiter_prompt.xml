@@ -34,12 +34,10 @@ Wrap your thought process inside <think> tags before providing the final output.
 After your thought process, provide your synthesized output using the following format:
 
 <synthesis_output>
-    <synthesis>
-        [Your synthesized response here. This should be a comprehensive summary that combines the best elements of the analyzed responses while addressing the original prompt effectively.]
-        [IMPORTANT: This should resemble a normall llm chat response. The final synthesis should EXCLUDE all meta analysis and discussion of the model responses.]
-        [CRITICAL: If user instructions were provided in the user_instructions section, strictly adhere to those formatting and style guidelines in your synthesis.]
-    </synthesis>
-    
+    <first_impression>
+        [Your initial thoughts on the responses and their relevance to the original prompt.]
+    </first_impression>
+
     <analysis>
         [A concise summary of your analysis, explaining how you arrived at your synthesized response and confidence level.]
     </analysis>
@@ -47,7 +45,17 @@ After your thought process, provide your synthesized output using the following 
     <dissent>
         [List any notable dissenting views or alternative perspectives that were not incorporated into the main synthesis but are still worth considering.]
     </dissent>
+
+    <synthesis>
+        [Your synthesized response here. This should be a comprehensive summary that combines the best elements of the analyzed responses while addressing the original prompt effectively.]
+        [IMPORTANT: This should resemble a normall llm chat response. The final synthesis should EXCLUDE all meta analysis and discussion of the model responses.]
+        [CRITICAL: If user instructions were provided in the user_instructions section, strictly adhere to those formatting and style guidelines in your synthesis.]
+    </synthesis>
     
+    <confidence>
+        [Your confidence in this synthesis, expressed as a decimal between 0 and 1. For example, 0.55 would indicate 55% confidence (ie very uncertain).]
+    </confidence>
+
     <refinement_areas>
         [If needs_iteration is true, provide a list of specific areas or aspects that require further refinement or exploration in subsequent iterations.]
     </refinement_areas>
@@ -55,11 +63,6 @@ After your thought process, provide your synthesized output using the following 
     <needs_iteration>
         [Indicate whether further iteration is needed. Use "true" if more refinement is necessary, or "false" if the current synthesis is sufficient.]
     </needs_iteration>
-    
-    <confidence>
-        [Your confidence in this synthesis, expressed as a decimal between 0 and 1. For example, 0.55 would indicate 55% confidence (ie very uncertain).]
-    </confidence>
-    
 </synthesis_output>
 
 Remember to maintain objectivity and consider all perspectives fairly in your analysis and synthesis. Your goal is to provide a comprehensive response that accurately represents the collective insights from the model responses while addressing the original prompt effectively.
