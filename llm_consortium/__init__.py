@@ -15,6 +15,7 @@ import time  # added import for time
 import concurrent.futures  # Add concurrent.futures for parallel processing
 import threading  # Add threading for thread-local storage
 import secrets
+import uuid  # Add uuid import
 
 
 # Read system prompt from file
@@ -286,13 +287,24 @@ class ConsortiumOrchestrator:
 
     def _get_model_responses(self, prompt: str) -> List[Dict[str, Any]]:
         responses = []
+        first_prompt_sent = False
+        
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
             for model, count in self.models.items():
                 for instance in range(count):
-                    futures.append(
-                        executor.submit(self._get_model_response, model, prompt, instance, self.consortium_id)
-                    )
+                    # If this is the first prompt, mark it and submit immediately
+                    if not first_prompt_sent:
+                        futures.append(
+                            executor.submit(self._get_model_response, model, prompt, instance, self.consortium_id)
+                        )
+                        first_prompt_sent = True
+                        # Sleep for 5 seconds to allow prompt caching to kick in
+                        time.sleep(5)
+                    else:
+                        futures.append(
+                            executor.submit(self._get_model_response, model, prompt, instance, self.consortium_id)
+                        )
 
             # Gather all results as they complete
             for future in concurrent.futures.as_completed(futures):
@@ -301,11 +313,14 @@ class ConsortiumOrchestrator:
         return responses
 
     def _get_model_response(self, model: str, prompt: str, instance: int, consortium_id: Optional[str] = None) -> Dict[str, Any]:
+        # Generate a unique UUID for this specific prompt
+        prompt_uuid = str(uuid.uuid4())
+        
         if model == 'test-model':
             response = llm.Response.fake()
             response._set_content('test response')
         else:
-            logger.debug(f"Getting response from model: {model} instance {instance + 1}")
+            logger.debug(f"Getting response from model: {model} instance {instance + 1} with UUID: {prompt_uuid}")
             attempts = 0
             max_retries = 3
 
@@ -315,6 +330,7 @@ class ConsortiumOrchestrator:
             while attempts < max_retries:
                 try:
                     xml_prompt = f"""<prompt>
+        <uuid>{prompt_uuid}</uuid>
         <instruction>{prompt}</instruction>
     </prompt>"""
 
@@ -327,6 +343,7 @@ class ConsortiumOrchestrator:
                         "instance": instance + 1,
                         "response": text,
                         "confidence": self._extract_confidence(text),
+                        "uuid": prompt_uuid,  # Include UUID in response
                     }
                 except Exception as e:
                     # Check if the error is a rate-limit error
@@ -337,8 +354,8 @@ class ConsortiumOrchestrator:
                         time.sleep(wait_time)
                     else:
                         logger.exception(f"Error getting response from {model} instance {instance + 1}")
-                        return {"model": model, "instance": instance + 1, "error": str(e)}
-            return {"model": model, "instance": instance + 1, "error": "Rate limit exceeded after retries."}
+                        return {"model": model, "instance": instance + 1, "error": str(e), "uuid": prompt_uuid}
+            return {"model": model, "instance": instance + 1, "error": "Rate limit exceeded after retries.", "uuid": prompt_uuid}
 
     def _parse_confidence_value(self, text: str, default: float = 0.0) -> float:
         """Helper method to parse confidence values consistently."""

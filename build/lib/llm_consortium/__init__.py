@@ -286,13 +286,24 @@ class ConsortiumOrchestrator:
 
     def _get_model_responses(self, prompt: str) -> List[Dict[str, Any]]:
         responses = []
+        first_prompt_sent = False
+        
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
             for model, count in self.models.items():
                 for instance in range(count):
-                    futures.append(
-                        executor.submit(self._get_model_response, model, prompt, instance, self.consortium_id)
-                    )
+                    # If this is the first prompt, mark it and submit immediately
+                    if not first_prompt_sent:
+                        futures.append(
+                            executor.submit(self._get_model_response, model, prompt, instance, self.consortium_id)
+                        )
+                        first_prompt_sent = True
+                        # Sleep for 5 seconds to allow prompt caching to kick in
+                        time.sleep(5)
+                    else:
+                        futures.append(
+                            executor.submit(self._get_model_response, model, prompt, instance, self.consortium_id)
+                        )
 
             # Gather all results as they complete
             for future in concurrent.futures.as_completed(futures):
